@@ -1,0 +1,7 @@
+﻿venv/
+__pycache__/
+*.pyc
+.env
+client_secret*.json
+output/
+!data/history.json

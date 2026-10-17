@@ -1,0 +1,71 @@
+﻿name: Autonomous YouTube Documentary Studio
+
+on:
+  schedule:
+    # Her gün sabah 08:00 UTC (Almanya saatiyle kışın 09:00, yazın 10:00) otomatik çalışır
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      target_language:
+        description: 'Hedef Dil (DE, EN, TR)'
+        required: true
+        default: 'DE'
+        type: choice
+        options:
+          - DE
+          - EN
+          - TR
+      privacy_status:
+        description: 'YouTube Gizlilik Durumu'
+        required: true
+        default: 'private'
+        type: choice
+        options:
+          - private
+          - unlisted
+          - public
+
+permissions:
+  contents: write
+
+jobs:
+  produce-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 1. Depoyu Çek (Checkout)
+        uses: actions/checkout@v4
+
+      - name: 2. FFmpeg ve Font Paketlerini Kur (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation
+
+      - name: 3. Python 3.11 Kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 4. Bağımlılıkları Yükle
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 5. Otonom Belgesel Üretimini ve YouTube Yüklemesini Çalıştır
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TARGET_LANGUAGE: ${{ inputs.target_language || 'DE' }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          python main.py --lang "${{ inputs.target_language || 'DE' }}" --privacy "${{ inputs.privacy_status || 'private' }}"
+
+      - name: 6. Güncellenen Konu Hafızasını (history.json) Depoya Kaydet
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/history.json
+          git diff --staged --quiet || (git commit -m "chore(memory): update 30-day topic history [skip ci]" && git push)

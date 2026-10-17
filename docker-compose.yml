@@ -1,0 +1,18 @@
+services:
+  dashboard:
+    build:
+      context: .
+    image: yt-docu-studio:local
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+      STREAMLIT_SERVER_PORT: "8501"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./assets:/app/assets
+    restart: unless-stopped
