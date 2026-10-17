@@ -2,7 +2,6 @@
 
 on:
   schedule:
-    # Her gün sabah 08:00 UTC (Almanya saatiyle kışın 09:00, yazın 10:00) otomatik çalışır
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
@@ -67,5 +66,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull origin main --rebase || true
           git add data/history.json
-          git diff --staged --quiet || (git commit -m "chore(memory): update 30-day topic history [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "chore(memory): update 30-day topic history [skip ci]" && git push origin main)
