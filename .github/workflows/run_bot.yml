@@ -36,7 +36,7 @@ jobs:
       - name: 1. Depoyu Çek (Checkout)
         uses: actions/checkout@v4
 
-      - name: 2. FFmpeg ve Font Paketlerini Kur (Ubuntu)
+      - name: 2. FFmpeg dan Font Paketlerini Kur (Ubuntu)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-liberation
