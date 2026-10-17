@@ -44,12 +44,11 @@ class VideoRenderer:
             return track_path
 
         logger.info(f"'{track_name}' bulunamadı. FFmpeg ile %100 telifsiz sinematik ambiyans sentezleniyor...")
-        # Haberin moduna göre harmonik akor frekansları
         if "tech" in track_name:
             expr = "0.15*sin(2*PI*110*t)+0.10*sin(2*PI*164.81*t)+0.08*sin(2*PI*220*t)+0.05*sin(2*PI*329.63*t)"
         elif "tension" in track_name:
             expr = "0.18*sin(2*PI*65.41*t)+0.12*sin(2*PI*98.0*t)+0.08*sin(2*PI*138.59*t)"
-        else:  # serious_news.mp3 (Derin D-Minor belgesel pad)
+        else:
             expr = "0.15*sin(2*PI*73.42*t)+0.12*sin(2*PI*110.0*t)+0.08*sin(2*PI*146.83*t)+0.05*sin(2*PI*220.0*t)"
 
         cmd = [
@@ -63,8 +62,19 @@ class VideoRenderer:
         logger.info(f"Ambiyans fon müziği üretildi: {track_path.name}")
         return track_path
 
+    def _verify_and_fix_image(self, img_path: Path):
+        """Görsel dosyasının sağlam ve geçerli bir imaj olup olmadığını denetler, bozuksa düzeltir."""
+        if not img_path.exists() or img_path.stat().st_size < 5000:
+            logger.warning(f"Görsel eksik veya bozuk ({img_path.name}), FFmpeg için yedek renkli tuval üretiliyor...")
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", "color=c=navy:s=1920x1080:d=1",
+                "-frames:v", "1", str(img_path)
+            ]
+            subprocess.run(cmd, capture_output=True, check=True)
+
     def _build_zoompan_filter(self, effect: str, duration: float) -> str:
-        """Titremeyi (jitter) önlemek için 4K upscale + 1080p Ken Burns zoompan filtresi."""
+        """Titremeyi önlemek için 4K upscale + 1080p Ken Burns zoompan filtresi."""
         frames = int(duration * self.fps) + 15
         if effect == "zoom_in":
             z_expr = f"min(zoom+0.0005,1.20)"
@@ -78,12 +88,11 @@ class VideoRenderer:
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(on/{frames})"
             y_expr = "ih/2-(ih/zoom/2)"
-        else:  # pan_right_to_left
+        else:
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(1-on/{frames})"
             y_expr = "ih/2-(ih/zoom/2)"
 
-        # Yumuşak sahne geçişi için her sahnenin başına ve sonuna 0.4 sn fade ekliyoruz
         fade_out_start = max(0.1, duration - 0.4)
         return (
             f"scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160,"
@@ -108,7 +117,7 @@ class VideoRenderer:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     def build_master_srt(self, scene_durations: List[float]) -> Path:
-        """Tüm sahnelerin bireysel .srt dosyalarını zaman ofsetleriyle tek bir master.srt'de birleştirir."""
+        """Tüm sahnelerin altyazılarını tek master.srt'de birleştirir."""
         master_srt_path = OUTPUT_DIR / "master_subtitles.srt"
         combined_blocks = []
         global_counter = 1
@@ -134,21 +143,22 @@ class VideoRenderer:
             time_offset += duration
 
         master_srt_path.write_text("\n".join(combined_blocks), encoding="utf-8")
-        logger.info(f"Birleştirilmiş altyazı hazır: {master_srt_path.name} ({global_counter - 1} satır)")
         return master_srt_path
 
     def render_full_video(self) -> Path:
-        """Tüm sahneleri, -24 dB fon müziğini ve altyazıları birleştirip 1080p MP4 üretir."""
+        """Tüm sahneleri, fon müziğini ve altyazıları birleştirip 1080p MP4 üretir."""
         logger.info("=== Aşama 4: FFmpeg Sinematik Render Başlıyor ===")
         clip_paths = []
         scene_durations = []
 
-        # 1. Her sahneyi kendi ses süresine göre Ken Burns efektiyle klip haline getir
         for scene in self.plan.scenes:
             idx = scene.scene_number
             img_path = self.scenes_dir / f"scene_{idx}.jpg"
             aud_path = self.audio_dir / f"scene_{idx}.mp3"
             clip_path = self.clips_dir / f"clip_{idx}.mp4"
+
+            # Görselin sağlamlığını kontrol et ve bozuksa onar
+            self._verify_and_fix_image(img_path)
 
             duration = self.get_audio_duration(aud_path)
             scene_durations.append(duration)
@@ -168,32 +178,26 @@ class VideoRenderer:
             subprocess.run(cmd, capture_output=True, check=True)
             clip_paths.append(clip_path)
 
-        # 2. Tüm sahne kliplerini uç uca birleştir (Concat)
         concat_list_path = OUTPUT_DIR / "concat_list.txt"
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for cp in clip_paths:
                 f.write(f"file '{cp.resolve().as_posix()}'\n")
 
         merged_raw_path = OUTPUT_DIR / "merged_raw.mp4"
-        logger.info("Sahneler birleştiriliyor...")
         subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", str(concat_list_path), "-c", "copy", str(merged_raw_path)
         ], capture_output=True, check=True)
 
-        # 3. Master SRT altyazısını oluştur
         master_srt = self.build_master_srt(scene_durations)
-        # Windows FFmpeg subtitles filtresi için dizin yolu kaçış (escape) formatı
         escaped_srt_path = master_srt.resolve().as_posix().replace(":", r"\:")
 
-        # 4. Fon müziği (-24 dB = 0.063 genlik) ve Altyazı Gömme (Final Render)
         final_video_path = OUTPUT_DIR / "final_documentary.mp4"
         music_path = self.ensure_background_music(self.plan.supervision.background_music)
 
         sub_style = "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=35,Bold=1"
         vf_sub = f"subtitles='{escaped_srt_path}':force_style='{sub_style}'"
 
-        logger.info("Final miksaj (-24 dB Audio Ducking) ve Altyazı gömme işlemi uygulanıyor...")
         if music_path and music_path.exists():
             cmd_final = [
                 "ffmpeg", "-y",
