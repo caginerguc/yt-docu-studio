@@ -35,8 +35,10 @@ jobs:
     steps:
       - name: 1. Depoyu Çek (Checkout)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 2. FFmpeg dan Font Paketlerini Kur (Ubuntu)
+      - name: 2. FFmpeg ve Font Paketlerini Kur (Ubuntu)
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-liberation
@@ -66,6 +68,11 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git pull origin main --rebase || true
           git add data/history.json
-          git diff --staged --quiet || (git commit -m "chore(memory): update 30-day topic history [skip ci]" && git push origin main)
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(memory): update 30-day topic history [skip ci]"
+            git pull --rebase -X theirs origin main
+            git push origin HEAD:main
+          else
+            echo "Hafıza dosyasında değişiklik yok."
+          fi
