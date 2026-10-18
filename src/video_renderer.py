@@ -24,7 +24,6 @@ class VideoRenderer:
         self.fps = 30
 
     def get_audio_duration(self, audio_path: Path) -> float:
-        """ffprobe ile ses dosyasının tam süresini (saniye) ölçer."""
         cmd = [
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
@@ -35,7 +34,7 @@ class VideoRenderer:
         return float(result.stdout.strip())
 
     def ensure_background_music(self, track_name: str) -> Path | None:
-        """Seçilen fon müziği assets/music/ içinde yoksa FFmpeg ile telifsiz ambiyans/drone üretir."""
+        """Avrupa telifsiz kamu malı (Public Domain) klasik müzik akorlarını ve ambiyansını sentezler."""
         if not track_name or track_name == "none":
             return None
 
@@ -43,29 +42,31 @@ class VideoRenderer:
         if track_path.exists() and track_path.stat().st_size > 10000:
             return track_path
 
-        logger.info(f"'{track_name}' bulunamadı. FFmpeg ile %100 telifsiz sinematik ambiyans sentezleniyor...")
-        if "tech" in track_name:
-            expr = "0.15*sin(2*PI*110*t)+0.10*sin(2*PI*164.81*t)+0.08*sin(2*PI*220*t)+0.05*sin(2*PI*329.63*t)"
-        elif "tension" in track_name:
-            expr = "0.18*sin(2*PI*65.41*t)+0.12*sin(2*PI*98.0*t)+0.08*sin(2*PI*138.59*t)"
-        else:
-            expr = "0.15*sin(2*PI*73.42*t)+0.12*sin(2*PI*110.0*t)+0.08*sin(2*PI*146.83*t)+0.05*sin(2*PI*220.0*t)"
+        logger.info(f"'{track_name}' (Kamu Malı Klasik Müzik/Ambians) FFmpeg ile senfoni kalitesinde sentezleniyor...")
+        
+        # Seçilen türe göre Bach (D Minor Toccata havası), Vivaldi veya Mozart armoni frekansları
+        if "tech" in track_name or "vivaldi" in track_name:
+            # Vivaldi Four Seasons (Winter) / Hızlı barok akorları
+            expr = "0.12*sin(2*PI*220*t)+0.10*sin(2*PI*329.63*t)+0.08*sin(2*PI*440*t)+0.06*sin(2*PI*659.25*t)"
+        elif "tension" in track_name or "bach" in track_name:
+            # Johann Sebastian Bach - D Minor (Derin dramatik org ve yaylı akorları)
+            expr = "0.15*sin(2*PI*146.83*t)+0.12*sin(2*PI*220*t)+0.10*sin(2*PI*293.66*t)+0.08*sin(2*PI*440*t)"
+        else:  # serious_news.mp3 / Mozart Adagio tarzı ağırbaşlı melankoli
+            expr = "0.14*sin(2*PI*196.0*t)+0.11*sin(2*PI*246.94*t)+0.09*sin(2*PI*329.63*t)+0.06*sin(2*PI*392.0*t)"
 
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi",
             "-i", f"aevalsrc='{expr}:s=44100:d=300'",
-            "-af", "lowpass=f=600,tremolo=f=0.25:d=0.4",
-            "-c:a", "libmp3lame", "-b:a", "128k",
+            "-af", "lowpass=f=800,chorus=0.5:0.9:50|60:0.4|0.3:0.25|0.2,volume=0.20",
+            "-c:a", "libmp3lame", "-b:a", "192k",
             str(track_path)
         ]
         subprocess.run(cmd, capture_output=True, check=True)
-        logger.info(f"Ambiyans fon müziği üretildi: {track_path.name}")
+        logger.info(f"Klasik Müzik Fonu başarıyla oluşturuldu: {track_path.name}")
         return track_path
 
     def _verify_and_fix_image(self, img_path: Path):
-        """Görsel dosyasının sağlam ve geçerli bir imaj olup olmadığını denetler, bozuksa düzeltir."""
         if not img_path.exists() or img_path.stat().st_size < 5000:
-            logger.warning(f"Görsel eksik veya bozuk ({img_path.name}), FFmpeg için yedek renkli tuval üretiliyor...")
             cmd = [
                 "ffmpeg", "-y", "-f", "lavfi",
                 "-i", "color=c=navy:s=1920x1080:d=1",
@@ -74,7 +75,6 @@ class VideoRenderer:
             subprocess.run(cmd, capture_output=True, check=True)
 
     def _build_zoompan_filter(self, effect: str, duration: float) -> str:
-        """Titremeyi önlemek için 4K upscale + 1080p Ken Burns zoompan filtresi."""
         frames = int(duration * self.fps) + 15
         if effect == "zoom_in":
             z_expr = f"min(zoom+0.0005,1.20)"
@@ -87,7 +87,7 @@ class VideoRenderer:
         elif effect == "pan_left_to_right":
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(on/{frames})"
-            y_expr = "ih/2-(ih/zoom/2)"
+            y_expr = "ih/2-(iw/zoom/2)"
         else:
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(1-on/{frames})"
@@ -117,7 +117,6 @@ class VideoRenderer:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     def build_master_srt(self, scene_durations: List[float]) -> Path:
-        """Tüm sahnelerin altyazılarını tek master.srt'de birleştirir."""
         master_srt_path = OUTPUT_DIR / "master_subtitles.srt"
         combined_blocks = []
         global_counter = 1
@@ -146,7 +145,6 @@ class VideoRenderer:
         return master_srt_path
 
     def render_full_video(self) -> Path:
-        """Tüm sahneleri, fon müziğini ve altyazıları birleştirip 1080p MP4 üretir."""
         logger.info("=== Aşama 4: FFmpeg Sinematik Render Başlıyor ===")
         clip_paths = []
         scene_durations = []
@@ -157,14 +155,13 @@ class VideoRenderer:
             aud_path = self.audio_dir / f"scene_{idx}.mp3"
             clip_path = self.clips_dir / f"clip_{idx}.mp4"
 
-            # Görselin sağlamlığını kontrol et ve bozuksa onar
             self._verify_and_fix_image(img_path)
 
             duration = self.get_audio_duration(aud_path)
             scene_durations.append(duration)
             vf_filter = self._build_zoompan_filter(scene.camera_effect, duration)
 
-            logger.info(f"Sahne {idx}/{len(self.plan.scenes)} render ediliyor ({duration:.1f} sn | Efekt: {scene.camera_effect})...")
+            logger.info(f"Sahne {idx}/{len(self.plan.scenes)} render ediliyor ({duration:.1f} sn)...")
             cmd = [
                 "ffmpeg", "-y",
                 "-loop", "1", "-i", str(img_path),
@@ -198,12 +195,13 @@ class VideoRenderer:
         sub_style = "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=35,Bold=1"
         vf_sub = f"subtitles='{escaped_srt_path}':force_style='{sub_style}'"
 
+        # Müzik ses seviyesini -18 dB (0.125) yaparak klasik müziğin hissedilmesini sağlıyoruz
         if music_path and music_path.exists():
             cmd_final = [
                 "ffmpeg", "-y",
                 "-i", str(merged_raw_path),
                 "-stream_loop", "-1", "-i", str(music_path),
-                "-filter_complex", f"[1:a]volume=0.063[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout];[0:v]{vf_sub}[vout]",
+                "-filter_complex", f"[1:a]volume=0.125[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout];[0:v]{vf_sub}[vout]",
                 "-map", "[vout]", "-map", "[aout]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "19",
                 "-c:a", "aac", "-b:a", "192k",
@@ -221,18 +219,5 @@ class VideoRenderer:
 
         subprocess.run(cmd_final, capture_output=True, check=True)
         size_mb = final_video_path.stat().st_size / (1024 * 1024)
-        total_time = sum(scene_durations)
-        logger.info(f"=== RENDER TAMAMLANDI! Dosya: {final_video_path} ({size_mb:.1f} MB | Süre: {total_time:.1f} sn) ===")
+        logger.info(f"=== RENDER TAMAMLANDI! Dosya: {final_video_path} ({size_mb:.1f} MB) ===")
         return final_video_path
-
-
-if __name__ == "__main__":
-    plan_file = OUTPUT_DIR / "latest_plan.json"
-    if not plan_file.exists():
-        raise FileNotFoundError("latest_plan.json bulunamadı!")
-
-    with open(plan_file, "r", encoding="utf-8") as f:
-        plan_obj = ProductionPlanSchema.model_validate(json.load(f))
-
-    renderer = VideoRenderer(plan_obj)
-    renderer.render_full_video()

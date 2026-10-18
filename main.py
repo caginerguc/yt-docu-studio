@@ -66,7 +66,7 @@ def run_autonomous_studio(language: str, privacy: str, skip_upload: bool = False
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Otonom YouTube Belgesel Stüdyosu Orkestratörü")
     parser.add_argument("--lang", type=str, default=TARGET_LANGUAGE, help="Hedef dil: DE, EN veya TR")
-    parser.add_argument("--privacy", type=str, default="private", choices=["private", "unlisted", "public"], help="YouTube gizlilik ayarı")
+    parser.add_argument("--privacy", type=str, default="public", choices=["private", "unlisted", "public"], help="YouTube gizlilik ayarı")
     parser.add_argument("--skip-upload", action="store_true", help="YouTube'a yüklemeden sadece videoyu üretir")
     args = parser.parse_args()
 

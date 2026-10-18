@@ -17,7 +17,7 @@ on:
       privacy_status:
         description: 'YouTube Gizlilik Durumu'
         required: true
-        default: 'private'
+        default: 'public'
         type: choice
         options:
           - private
