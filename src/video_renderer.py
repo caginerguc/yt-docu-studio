@@ -44,20 +44,17 @@ class VideoRenderer:
 
         logger.info(f"'{track_name}' (Kamu Malı Klasik Müzik/Ambians) FFmpeg ile senfoni kalitesinde sentezleniyor...")
         
-        # Seçilen türe göre Bach (D Minor Toccata havası), Vivaldi veya Mozart armoni frekansları
         if "tech" in track_name or "vivaldi" in track_name:
-            # Vivaldi Four Seasons (Winter) / Hızlı barok akorları
             expr = "0.12*sin(2*PI*220*t)+0.10*sin(2*PI*329.63*t)+0.08*sin(2*PI*440*t)+0.06*sin(2*PI*659.25*t)"
         elif "tension" in track_name or "bach" in track_name:
-            # Johann Sebastian Bach - D Minor (Derin dramatik org ve yaylı akorları)
             expr = "0.15*sin(2*PI*146.83*t)+0.12*sin(2*PI*220*t)+0.10*sin(2*PI*293.66*t)+0.08*sin(2*PI*440*t)"
-        else:  # serious_news.mp3 / Mozart Adagio tarzı ağırbaşlı melankoli
+        else:
             expr = "0.14*sin(2*PI*196.0*t)+0.11*sin(2*PI*246.94*t)+0.09*sin(2*PI*329.63*t)+0.06*sin(2*PI*392.0*t)"
 
         cmd = [
             "ffmpeg", "-y", "-f", "lavfi",
             "-i", f"aevalsrc='{expr}:s=44100:d=300'",
-            "-af", "lowpass=f=800,chorus=0.5:0.9:50|60:0.4|0.3:0.25|0.2,volume=0.20",
+            "-af", "lowpass=f=800,tremolo=f=0.25:d=0.5,volume=0.20",
             "-c:a", "libmp3lame", "-b:a", "192k",
             str(track_path)
         ]
@@ -87,7 +84,7 @@ class VideoRenderer:
         elif effect == "pan_left_to_right":
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(on/{frames})"
-            y_expr = "ih/2-(iw/zoom/2)"
+            y_expr = "ih/2-(ih/zoom/2)"
         else:
             z_expr = "1.15"
             x_expr = f"(iw-iw/zoom)*(1-on/{frames})"
@@ -195,7 +192,6 @@ class VideoRenderer:
         sub_style = "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BackColour=&H80000000,BorderStyle=4,Outline=1,Shadow=0,MarginV=35,Bold=1"
         vf_sub = f"subtitles='{escaped_srt_path}':force_style='{sub_style}'"
 
-        # Müzik ses seviyesini -18 dB (0.125) yaparak klasik müziğin hissedilmesini sağlıyoruz
         if music_path and music_path.exists():
             cmd_final = [
                 "ffmpeg", "-y",
@@ -221,3 +217,15 @@ class VideoRenderer:
         size_mb = final_video_path.stat().st_size / (1024 * 1024)
         logger.info(f"=== RENDER TAMAMLANDI! Dosya: {final_video_path} ({size_mb:.1f} MB) ===")
         return final_video_path
+
+
+if __name__ == "__main__":
+    plan_file = OUTPUT_DIR / "latest_plan.json"
+    if not plan_file.exists():
+        raise FileNotFoundError("latest_plan.json bulunamadı!")
+
+    with open(plan_file, "r", encoding="utf-8") as f:
+        plan_obj = ProductionPlanSchema.model_validate(json.load(f))
+
+    renderer = VideoRenderer(plan_obj)
+    renderer.render_full_video()
