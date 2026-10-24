@@ -64,3 +64,6 @@ LANGUAGE_CONFIG = {
 
 def get_active_config(lang: str = TARGET_LANGUAGE):
     return LANGUAGE_CONFIG.get(lang.upper(), LANGUAGE_CONFIG["DE"])
+
+HISTORY_RETENTION_DAYS = 30
+
