@@ -1,23 +1,21 @@
 ﻿import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from urllib.parse import quote
 import requests
 import edge_tts
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from google import genai
+from google.genai import types
 
-from src.config import OUTPUT_DIR, get_active_config
+from src.config import OUTPUT_DIR, get_active_config, GEMINI_API_KEY, GEMINI_MODEL, POLLINATIONS_API_KEY
 from src.agents_editorial import ProductionPlanSchema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("Stage3_MediaGenerator")
-
-FALLBACK_VOICES = {
-    "DE": ["de-DE-KillianNeural", "de-DE-ConradNeural", "de-DE-FlorianMultilingualNeural"],
-    "EN": ["en-US-ChristopherNeural", "en-US-GuyNeural", "en-US-EricNeural"],
-    "TR": ["tr-TR-AhmetNeural", "tr-TR-EmelNeural"]
-}
 
 
 class MediaGenerator:
@@ -25,64 +23,134 @@ class MediaGenerator:
         self.plan = plan
         self.config = get_active_config(plan.language)
         self.voice = self.config["voice"]
+        self.fallback_voices = self.config.get("fallback_voices", [self.voice])
+        self.pollinations_token = POLLINATIONS_API_KEY
         self.scenes_dir = OUTPUT_DIR / "scenes"
         self.audio_dir = OUTPUT_DIR / "audio"
         self.scenes_dir.mkdir(parents=True, exist_ok=True)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
+        
+        if GEMINI_API_KEY:
+            self.gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        else:
+            self.gemini_client = None
 
-    def download_pollinations_image(self, prompt: str, output_path: Path, seed: int = 42, retries: int = 6) -> Path:
-        """Pollinations.ai üzerinden 16:9 görsel indirir (Güçlendirilmiş bulut rate-limit korumalı)."""
+    def download_image_with_token(self, prompt: str, output_path: Path, seed: int = 42) -> Path:
         if output_path.exists() and output_path.stat().st_size > 10000:
             logger.info(f"Görsel zaten mevcut, atlanıyor: {output_path.name}")
             return output_path
 
-        enhanced_prompt = f"{prompt}, cinematic 16:9 widescreen, no text, no watermark, photorealistic, 8k"
+        enhanced_prompt = f"{prompt}, cinematic 16:9 widescreen, photorealistic, 8k"
         encoded_prompt = quote(enhanced_prompt)
-        models_to_try = ["flux", "turbo", "flux", "turbo", "flux", "turbo"]
+        headers = {"User-Agent": "Mozilla/5.0"}
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&seed={seed}&model=flux&nologo=true"
+        
+        if self.pollinations_token:
+            headers["Authorization"] = f"Bearer {self.pollinations_token}"
+            url += f"&key={self.pollinations_token}"
 
-        for attempt in range(1, retries + 1):
-            model_name = models_to_try[attempt - 1]
-            url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&seed={seed + attempt * 11}&model={model_name}&nologo=true"
-            try:
-                logger.info(f"Görsel indiriliyor ({output_path.name} | Model: {model_name}) - Deneme {attempt}/{retries}...")
-                response = requests.get(
-                    url,
-                    timeout=90,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-                )
-                
-                if response.status_code in (402, 429):
-                    wait_sec = 20 * attempt
-                    logger.warning(f"Pollinations Hız Sınırı (HTTP {response.status_code}). {wait_sec} sn bekleniyor...")
-                    time.sleep(wait_sec)
+        logger.info(f"Görsel indiriliyor ({output_path.name})...")
+        response = requests.get(url, timeout=90, headers=headers)
+        response.raise_for_status()
+
+        with open(output_path, "wb") as f:
+            f.write(response.content)
+
+        return output_path
+
+    def download_image_fallback_gemini(self, prompt: str, output_path: Path) -> Path:
+        if not self.gemini_client:
+            raise RuntimeError("Gemini istemcisi tanımlı değil.")
+        
+        logger.info(f"Yedek motor devreye giriyor: Gemini Image ({output_path.name})...")
+        result = self.gemini_client.models.generate_images(
+            model="gemini-3.1-flash-image",
+            prompt=f"Cinematic 16:9 widescreen documentary photo: {prompt}",
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="16:9",
+                output_mime_type="image/jpeg"
+            )
+        )
+        for gen_img in result.generated_images:
+            with open(output_path, "wb") as f:
+                f.write(gen_img.image.image_bytes)
+            return output_path
+        
+        raise RuntimeError("Gemini görsel üretemedi.")
+
+    def download_safe(self, prompt: str, output_path: Path, seed: int = 42):
+        try:
+            self.download_image_with_token(prompt, output_path, seed)
+        except Exception as e:
+            logger.warning(f"Pollinations uyarısı: {e}. Gemini Image deneniyor...")
+            self.download_image_fallback_gemini(prompt, output_path)
+
+    def generate_professional_thumbnail(self, raw_thumb_path: Path, title: str):
+        """Pillow ile ham arka plan üzerine yüksek kontrastlı YouTube tipografisi ve filigran basar."""
+        try:
+            logger.info("Pillow ile profesyonel YouTube Thumbnail tipografisi oluşturuluyor...")
+            img = Image.open(raw_thumb_path).convert("RGBA")
+            img = img.resize((1280, 720), Image.Resampling.LANCZOS)
+            
+            # Kontrastı ve doygunluğu artır (Thumbnail YouTube'da küçük görünürken patlasın)
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(1.25)
+            
+            # Alttan ve sol taraftan karartma gradyanı (Metin arkasına kontrast)
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            draw_overlay = ImageDraw.Draw(overlay)
+            for y in range(360, 720):
+                alpha = int(180 * ((y - 360) / 360))
+                draw_overlay.line([(0, y), (1280, y)], fill=(0, 0, 0, alpha))
+            
+            img = Image.alpha_composite(img, overlay)
+            draw = ImageDraw.Draw(img)
+
+            # Sistem fontu seçimi
+            font_title = None
+            font_brand = None
+            for font_name in ["impact.ttf", "arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"]:
+                try:
+                    font_title = ImageFont.truetype(font_name, 68)
+                    font_brand = ImageFont.truetype(font_name, 32)
+                    break
+                except:
                     continue
+            
+            if not font_title:
+                font_title = ImageFont.load_default()
+                font_brand = ImageFont.load_default()
 
-                response.raise_for_status()
-                
-                with open(output_path, "wb") as f:
-                    f.write(response.content)
-                
-                size_kb = output_path.stat().st_size / 1024
-                logger.info(f"Görsel kaydedildi: {output_path.name} ({size_kb:.1f} KB)")
-                return output_path
-            except Exception as e:
-                logger.warning(f"Görsel indirme uyarısı ({output_path.name}): {e}")
-                if attempt < retries:
-                    time.sleep(15 * attempt)
-                else:
-                    raise RuntimeError(f"Görsel {retries} denemeye rağmen indirilemedi: {output_path.name}")
+            # Başlıktan vurucu 2-3 kelime çıkar
+            clean_title = title.split(":")[0].replace("?", "").replace("!", "").strip().upper()
+            words = clean_title.split()
+            display_text = " ".join(words[:4]) if len(words) > 4 else clean_title
+
+            # Sarı zemin, kalın siyah dış hat (YouTube kanıtlanmış renk paleti)
+            text_x, text_y = 50, 480
+            stroke_w = 6
+            draw.text((text_x, text_y), display_text, font=font_title, fill="#FFE600", stroke_width=stroke_w, stroke_fill="#000000")
+
+            # Sol üste 'MAKROKONTEXT' kurumsal filigran kutusu
+            draw.rectangle([(50, 40), (320, 90)], fill=(225, 6, 0, 230))  # Kırmızı kutu
+            draw.text((65, 48), "MAKROKONTEXT", font=font_brand, fill="#FFFFFF")
+
+            final_thumb = img.convert("RGB")
+            final_thumb.save(raw_thumb_path, "JPEG", quality=95)
+            logger.info("Profesyonel Thumbnail başarıyla mühürlendi!")
+        except Exception as e:
+            logger.warning(f"Pillow thumbnail tipografi uyarısı (orijinal korunuyor): {e}")
 
     async def _generate_single_tts_and_srt(self, text: str, mp3_path: Path, srt_path: Path, retries: int = 4):
-        """Edge-TTS ile ses ve altyazı üretir (NoAudioReceived ve WebSocket kopmalarına karşı Retry + Fallback korumalı)."""
         if mp3_path.exists() and srt_path.exists() and mp3_path.stat().st_size > 1000:
-            logger.info(f"Ses zaten mevcut, atlanıyor: {mp3_path.name}")
             return
 
         clean_text = " ".join(text.strip().split())
-        voices_list = FALLBACK_VOICES.get(self.plan.language.upper(), [self.voice])
+        voices = [self.voice] + self.fallback_voices
 
         for attempt in range(1, retries + 1):
-            active_voice = voices_list[(attempt - 1) % len(voices_list)]
+            active_voice = voices[(attempt - 1) % len(voices)]
             try:
                 communicate = edge_tts.Communicate(text=clean_text, voice=active_voice)
                 submaker = edge_tts.SubMaker()
@@ -95,21 +163,18 @@ class MediaGenerator:
                             submaker.feed(chunk)
 
                 if not mp3_path.exists() or mp3_path.stat().st_size < 500:
-                    raise RuntimeError("Üretilen ses dosyası boş.")
+                    raise RuntimeError("Boş ses dosyası.")
 
-                srt_content = submaker.get_srt()
                 with open(srt_path, "w", encoding="utf-8") as srt_file:
-                    srt_file.write(srt_content)
-
-                logger.info(f"Ses ve Altyazı üretildi: {mp3_path.name} (Ses: {active_voice})")
+                    srt_file.write(submaker.get_srt())
                 return
             except Exception as e:
-                logger.warning(f"Edge-TTS uyarısı ({mp3_path.name} - Deneme {attempt}/{retries} - Ses: {active_voice}): {e}")
+                logger.warning(f"Edge-TTS deneme {attempt}/{retries} ({active_voice}): {e}")
                 mp3_path.unlink(missing_ok=True)
                 if attempt < retries:
-                    await asyncio.sleep(4 * attempt)
+                    await asyncio.sleep(2 * attempt)
                 else:
-                    raise RuntimeError(f"Edge-TTS {retries} denemeye rağmen ses üretemedi: {mp3_path.name}")
+                    raise RuntimeError(f"Edge-TTS ses üretemedi: {mp3_path.name}")
 
     async def generate_all_audio(self):
         for scene in self.plan.scenes:
@@ -119,7 +184,7 @@ class MediaGenerator:
                 self.audio_dir / f"scene_{idx}.mp3",
                 self.audio_dir / f"scene_{idx}.srt"
             )
-            await asyncio.sleep(2)  # WebSocket throttling koruması
+            await asyncio.sleep(1)
 
     def generate_all_visuals(self):
         base_seed = int(time.time()) % 10000
@@ -127,27 +192,19 @@ class MediaGenerator:
             idx = scene.scene_number
             img_path = self.scenes_dir / f"scene_{idx}.jpg"
             need_sleep = not img_path.exists()
-            self.download_pollinations_image(
-                prompt=scene.visual_prompt_en,
-                output_path=img_path,
-                seed=base_seed + idx
-            )
+            self.download_safe(scene.visual_prompt_en, img_path, base_seed + idx)
             if need_sleep:
-                logger.info("Bulut rate-limit koruması için 15 saniye bekleniyor...")
-                time.sleep(15)
+                time.sleep(2)
 
         thumb_path = OUTPUT_DIR / "thumbnail.jpg"
-        self.download_pollinations_image(
-            prompt=self.plan.seo.thumbnail_prompt_en,
-            output_path=thumb_path,
-            seed=base_seed + 99
-        )
+        self.download_safe(self.plan.seo.thumbnail_prompt_en, thumb_path, base_seed + 99)
+        self.generate_professional_thumbnail(thumb_path, self.plan.seo.youtube_title)
 
     def run_pipeline(self):
-        logger.info(f"=== Medya Üretimi Başlıyor (Ana Ses: {self.voice}) ===")
+        logger.info(f"=== Medya Üretimi Başlıyor (Hedef Ses: {self.voice}) ===")
         asyncio.run(self.generate_all_audio())
         self.generate_all_visuals()
-        logger.info("=== Tüm Görsel, Ses ve Altyazı Dosyaları Başarıyla Üretildi! ===")
+        logger.info("=== Tüm Görsel, Ses, Altyazı ve Tipografik Thumbnail Hazır! ===")
 
 
 if __name__ == "__main__":
