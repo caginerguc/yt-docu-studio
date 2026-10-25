@@ -1,0 +1,50 @@
+﻿name: MakroKontext V3 Production
+
+on:
+  schedule:
+    # Haftada 2 kez (Örn: Çarşamba ve Pazar günleri UTC 16:00'da çalışır)
+    - cron: '0 16 * * 3,7'
+  workflow_dispatch: # Manuel olarak GitHub panelinden de tetiklenebilir
+
+jobs:
+  produce-documentary:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Repo Kopyala (Checkout)
+      uses: actions/checkout@v4
+
+    - name: Python Kurulumu
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Sistem Bağımlılıkları (FFmpeg)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Python Paketlerini Yükle
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Belgesel Üretim Motorunu Çalıştır
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        WIKI_CONTACT: ${{ secrets.WIKI_CONTACT }}
+        UPLOAD_ENABLED: true
+        UPLOAD_PRIVACY: private  # Güvenlik için ilk başta private başlatmak en iyisidir
+        YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+        YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+        YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      run: |
+        python main.py --lang de
+
+    - name: Üretilen Çıktıları Sakla (Artifacts)
+      uses: actions/upload-artifact@v4
+      with:
+        name: documentary-output
+        path: output/
