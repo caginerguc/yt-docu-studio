@@ -1,4 +1,5 @@
 ﻿import asyncio
+import io
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from google import genai
 from google.genai import types
 
-from src.config import OUTPUT_DIR, get_active_config, GEMINI_API_KEY, GEMINI_MODEL, POLLINATIONS_API_KEY
+from src.config import OUTPUT_DIR, get_active_config, GEMINI_API_KEY, POLLINATIONS_API_KEY
 from src.agents_editorial import ProductionPlanSchema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -35,56 +36,61 @@ class MediaGenerator:
         else:
             self.gemini_client = None
 
-    def download_image_with_token(self, prompt: str, output_path: Path, seed: int = 42) -> Path:
+    def download_image_pollinations(self, prompt: str, output_path: Path, seed: int = 42) -> Path:
         if output_path.exists() and output_path.stat().st_size > 10000:
             logger.info(f"Görsel zaten mevcut, atlanıyor: {output_path.name}")
             return output_path
 
-        enhanced_prompt = f"{prompt}, cinematic 16:9 widescreen, photorealistic, 8k"
+        enhanced_prompt = f"{prompt}, cinematic 16:9 widescreen, photorealistic, 8k, no text"
         encoded_prompt = quote(enhanced_prompt)
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&seed={seed}&model=flux&nologo=true"
-        
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         if self.pollinations_token:
             headers["Authorization"] = f"Bearer {self.pollinations_token}"
-            url += f"&key={self.pollinations_token}"
 
-        logger.info(f"Görsel indiriliyor ({output_path.name})...")
-        response = requests.get(url, timeout=90, headers=headers)
-        response.raise_for_status()
+        for model_name in ["flux", "turbo"]:
+            for attempt in range(1, 3):
+                current_seed = seed + (attempt * 7)
+                url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&seed={current_seed}&model={model_name}&nologo=true"
+                if self.pollinations_token:
+                    url += f"&key={self.pollinations_token}"
 
-        with open(output_path, "wb") as f:
-            f.write(response.content)
+                try:
+                    logger.info(f"Pollinations ({model_name}, deneme {attempt}) indiriliyor: {output_path.name}...")
+                    response = requests.get(url, timeout=75, headers=headers)
+                    if response.status_code == 200 and len(response.content) > 8000:
+                        with open(output_path, "wb") as f:
+                            f.write(response.content)
+                        return output_path
+                    logger.warning(f"Pollinations HTTP {response.status_code} döndü, bekleniyor...")
+                except Exception as e:
+                    logger.warning(f"Pollinations bağlantı uyarısı ({model_name}): {e}")
+                time.sleep(4 * attempt)
 
+        raise RuntimeError("Pollinations tüm denemelerde başarısız oldu.")
+
+    def create_studio_fallback_canvas(self, output_path: Path, scene_title: str = "MAKROKONTEXT"):
+        """Tüm dış görsel API'leri çökerse sistemi durdurmamak için kurumsal sinematik arka plan üretir."""
+        logger.info(f"Kurumsal yedek stüdyo tuvali oluşturuluyor: {output_path.name}")
+        img = Image.new("RGB", (1920, 1080), (12, 18, 28))
+        draw = ImageDraw.Draw(img)
+        for y in range(1080):
+            r = int(10 + (y / 1080) * 18)
+            g = int(16 + (y / 1080) * 28)
+            b = int(28 + (y / 1080) * 45)
+            draw.line([(0, y), (1920, y)], fill=(r, g, b))
+        for x in range(0, 1920, 120):
+            draw.line([(x, 0), (x, 1080)], fill=(25, 38, 58), width=1)
+        for y in range(0, 1080, 120):
+            draw.line([(0, y), (1920, y)], fill=(25, 38, 58), width=1)
+        img.save(output_path, "JPEG", quality=92)
         return output_path
-
-    def download_image_fallback_gemini(self, prompt: str, output_path: Path) -> Path:
-        if not self.gemini_client:
-            raise RuntimeError("Gemini istemcisi tanımlı değil.")
-        
-        logger.info(f"Yedek motor devreye giriyor: Gemini Image ({output_path.name})...")
-        result = self.gemini_client.models.generate_images(
-            model="gemini-3.1-flash-image",
-            prompt=f"Cinematic 16:9 widescreen documentary photo: {prompt}",
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio="16:9",
-                output_mime_type="image/jpeg"
-            )
-        )
-        for gen_img in result.generated_images:
-            with open(output_path, "wb") as f:
-                f.write(gen_img.image.image_bytes)
-            return output_path
-        
-        raise RuntimeError("Gemini görsel üretemedi.")
 
     def download_safe(self, prompt: str, output_path: Path, seed: int = 42):
         try:
-            self.download_image_with_token(prompt, output_path, seed)
+            self.download_image_pollinations(prompt, output_path, seed)
         except Exception as e:
-            logger.warning(f"Pollinations uyarısı: {e}. Gemini Image deneniyor...")
-            self.download_image_fallback_gemini(prompt, output_path)
+            logger.warning(f"Görsel API uyarısı ({e}). Sistemin durmaması için stüdyo tuvali devreye giriyor...")
+            self.create_studio_fallback_canvas(output_path)
 
     def generate_professional_thumbnail(self, raw_thumb_path: Path, title: str):
         """Pillow ile ham arka plan üzerine yüksek kontrastlı YouTube tipografisi ve filigran basar."""
@@ -93,48 +99,44 @@ class MediaGenerator:
             img = Image.open(raw_thumb_path).convert("RGBA")
             img = img.resize((1280, 720), Image.Resampling.LANCZOS)
             
-            # Kontrastı ve doygunluğu artır (Thumbnail YouTube'da küçük görünürken patlasın)
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.25)
             
-            # Alttan ve sol taraftan karartma gradyanı (Metin arkasına kontrast)
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw_overlay = ImageDraw.Draw(overlay)
             for y in range(360, 720):
-                alpha = int(180 * ((y - 360) / 360))
+                alpha = int(185 * ((y - 360) / 360))
                 draw_overlay.line([(0, y), (1280, y)], fill=(0, 0, 0, alpha))
             
             img = Image.alpha_composite(img, overlay)
             draw = ImageDraw.Draw(img)
 
-            # Sistem fontu seçimi
             font_title = None
             font_brand = None
-            for font_name in ["impact.ttf", "arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"]:
+            for font_name in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "impact.ttf",
+                "arialbd.ttf",
+                "DejaVuSans-Bold.ttf"
+            ]:
                 try:
                     font_title = ImageFont.truetype(font_name, 68)
                     font_brand = ImageFont.truetype(font_name, 32)
                     break
-                except:
+                except Exception:
                     continue
             
             if not font_title:
                 font_title = ImageFont.load_default()
                 font_brand = ImageFont.load_default()
 
-            # Başlıktan vurucu 2-3 kelime çıkar
             clean_title = title.split(":")[0].replace("?", "").replace("!", "").strip().upper()
             words = clean_title.split()
             display_text = " ".join(words[:4]) if len(words) > 4 else clean_title
 
-            # Sarı zemin, kalın siyah dış hat (YouTube kanıtlanmış renk paleti)
-            text_x, text_y = 50, 480
-            stroke_w = 6
-            draw.text((text_x, text_y), display_text, font=font_title, fill="#FFE600", stroke_width=stroke_w, stroke_fill="#000000")
-
-            # Sol üste 'MAKROKONTEXT' kurumsal filigran kutusu
-            draw.rectangle([(50, 40), (320, 90)], fill=(225, 6, 0, 230))  # Kırmızı kutu
-            draw.text((65, 48), "MAKROKONTEXT", font=font_brand, fill="#FFFFFF")
+            draw.text((50, 480), display_text, font=font_title, fill="#FFE600", stroke_width=6, stroke_fill="#000000")
+            draw.rectangle([(50, 40), (340, 92)], fill=(225, 6, 0, 235))
+            draw.text((65, 50), "MAKROKONTEXT", font=font_brand, fill="#FFFFFF")
 
             final_thumb = img.convert("RGB")
             final_thumb.save(raw_thumb_path, "JPEG", quality=95)
@@ -184,7 +186,7 @@ class MediaGenerator:
                 self.audio_dir / f"scene_{idx}.mp3",
                 self.audio_dir / f"scene_{idx}.srt"
             )
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.2)
 
     def generate_all_visuals(self):
         base_seed = int(time.time()) % 10000
@@ -194,7 +196,7 @@ class MediaGenerator:
             need_sleep = not img_path.exists()
             self.download_safe(scene.visual_prompt_en, img_path, base_seed + idx)
             if need_sleep:
-                time.sleep(2)
+                time.sleep(3)
 
         thumb_path = OUTPUT_DIR / "thumbnail.jpg"
         self.download_safe(self.plan.seo.thumbnail_prompt_en, thumb_path, base_seed + 99)
