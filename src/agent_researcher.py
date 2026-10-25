@@ -17,16 +17,17 @@ from src.config import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("Agent1_Researcher")
+logger = logging.getLogger("Agent1_MysteryResearcher")
 
 
 class SelectedTopicSchema(BaseModel):
-    topic_id: str = Field(description="Konuyu özetleyen benzersiz, küçük harfli ve tireli İngilizce/Almanca slug (örn: vw-factory-closures-de).")
-    original_headline: str = Field(description="Seçilen haberin orijinal başlığı.")
-    source_url: str = Field(description="Haberin kaynak linki.")
-    core_event_summary: str = Field(description="Haberin tamamen olgusal, objektif ve detaylı özeti.")
-    editorial_angle: str = Field(description="DW/Arte tarzı belgesel için derinlemesine ekonomik/teknolojik analiz açısı.")
-    viral_score: int = Field(description="1-100 arası izlenme potansiyeli skoru.", ge=1, le=100)
+    topic_id: str = Field(description="Konuyu özetleyen benzersiz, küçük harfli ve tireli slug (örn: oppenheimer-hidden-soviet-file).")
+    original_headline: str = Field(description="İlham alınan güncel trend veya haber başlığı.")
+    source_url: str = Field(description="Haberin veya referansın kaynak linki.")
+    historical_or_mystery_hook: str = Field(description="Güncel olayın bağlandığı derin tarihsel sır, gizli istihbarat dosyası, unutulmuş bilim insanı veya tarihi eser/finansal entrika.")
+    core_event_summary: str = Field(description="Konunun tarihsel arka planı, gizli kalmış detayları, gerçek isimler, tarihler ve arşiv gerçekleri.")
+    editorial_angle: str = Field(description="Lemmino, Fern ve Arte tarzı karanlık, merak uyandırıcı, sinematik araştırma-belgesel anlatım açısı.")
+    viral_score: int = Field(description="1-100 arası Evergreen (yıllarca izlenme) potansiyeli skoru.", ge=1, le=100)
 
 
 class NewsIntelligenceAgent:
@@ -61,7 +62,7 @@ class NewsIntelligenceAgent:
         history = self.load_recent_history()
         history.append({
             "topic_id": topic.topic_id,
-            "headline": topic.original_headline,
+            "headline": topic.historical_or_mystery_hook,
             "date": datetime.now().isoformat(),
             "language": self.language
         })
@@ -82,29 +83,35 @@ class NewsIntelligenceAgent:
                     })
             except Exception as e:
                 logger.warning(f"RSS hatası ({url}): {e}")
-        logger.info(f"Toplam {len(articles)} güncel haber başlığı toplandı.")
+        logger.info(f"Toplam {len(articles)} güncel trend sinyali toplandı.")
         return articles
 
-    def select_best_topic(self, auto_save_to_memory: bool = True) -> SelectedTopicSchema:
+    def select_best_topic(self, auto_save_to_memory: bool = True, commit_to_history: bool = True) -> SelectedTopicSchema:
         articles = self.fetch_rss_headlines()
         if not articles:
-            raise RuntimeError("Hiçbir RSS kaynağından haber çekilemedi!")
+            raise RuntimeError("Hiçbir RSS kaynağından veri çekilemedi!")
 
         recent_history = self.load_recent_history()
         used_topics_str = "\n".join([f"- {h['topic_id']}: {h['headline']}" for h in recent_history]) or "Henüz işlenmiş konu yok."
         articles_str = "\n".join([f"[{i+1}] {a['title']} | {a['summary']} (URL: {a['link']})" for i, a in enumerate(articles)])
 
-        system_instruction = f"""
-        Sen MakroKontext belgesel kanalının Baş Araştırmacısısın (Ajan 1).
-        Görevin: Verilen güncel haber listesinden DACH bölgesi izleyicisi için en yüksek analitik derinliğe sahip ekonomi, sanayi veya teknoloji konusunu seçmek.
-        KESİN KURAL: Aşağıdaki 'SON 30 GÜNDE İŞLENEN KONULAR' listesindeki konularla aynı veya çok benzer bir haberi ASLA seçme!
+        system_instruction = """
+        Sen MakroKontext Sinematik Belgesel Stüdyosu'nun Baş Araştırmacısısın (Ajan 1).
+        Amacımız: Sıradan günlük haber videoları yapmak DEĞİL; yıllarca izlenecek (Evergreen), yüksek merak uyandıran, Lemmino / Arte / ColdFusion tarzı derinlemesine gizem ve tarih belgeselleri üretmektir.
+        
+        GÖREVİN:
+        1. Güncel haber havuzundaki trendlere bak (örneğin çip krizi, enerji savaşları, yapay zeka, merkez bankaları, savunma sanayii, uzay yarışı).
+        2. Bu güncel trendi bir SIÇRAMA TAHTASI olarak kullan ve arkasındaki ESRARENGİZ TARİHSEL KÖKENİ, GÖLGEDEKİ BİLİM İNSANINI, SİYASİ/İSTİHBARİ GİZLİ DOSYAYI veya TARİHİ ESER/FİNANSAL ENTRİKAYI bul.
+           - Örnek: Gündemde enerji/elektrik krizi varsa -> Nikola Tesla'nın FBI tarafından el konulan kayıp Wardenclyffe dosyalarına veya 1973 gizli petrol anlaşmasına bağla.
+           - Örnek: Gündemde yapay zeka/şifreleme varsa -> Alan Turing'in gizlenen Bletchley Park belgelerine veya Soğuk Savaş'taki Operation Rubicon (Crypto AG) casusluk operasyonuna bağla.
+        3. KESİN KURAL: 'DAHA ÖNCE İŞLENEN KONULAR' listesindeki konularla aynı veya benzer bir konuyu ASLA seçme! Gerçek tarihsel olgulara, gerçek tarihlere ve dosyalara dayan.
         """
 
         prompt = f"""
-        === SON 30 GÜNDE İŞLENEN KONULAR (BUNLARI SEÇME) ===
+        === DAHA ÖNCE İŞLENEN KONULAR (BUNLARI SEÇME) ===
         {used_topics_str}
 
-        === GÜNCEL HABER HAVUZU ===
+        === İLHAM ALINACAK GÜNCEL TREND HAVUZU ===
         {articles_str}
         """
 
@@ -115,14 +122,14 @@ class NewsIntelligenceAgent:
                 system_instruction=system_instruction,
                 response_mime_type="application/json",
                 response_schema=SelectedTopicSchema,
-                temperature=0.3,
+                temperature=0.5,
             )
         )
 
         selected = SelectedTopicSchema.model_validate_json(response.text)
-        logger.info(f"Seçilen Konu: {selected.topic_id} (Skor: {selected.viral_score})")
+        logger.info(f"Seçilen Zamansız Belgesel Konusu: {selected.topic_id} | {selected.historical_or_mystery_hook}")
 
-        if auto_save_to_memory:
+        if auto_save_to_memory and commit_to_history:
             self.save_to_history(selected)
 
         return selected
