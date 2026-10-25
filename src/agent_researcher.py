@@ -85,7 +85,7 @@ class NewsIntelligenceAgent:
         logger.info(f"Toplam {len(articles)} güncel haber başlığı toplandı.")
         return articles
 
-    def select_best_topic(self, commit_to_history: bool = True) -> SelectedTopicSchema:
+    def select_best_topic(self, auto_save_to_memory: bool = True) -> SelectedTopicSchema:
         articles = self.fetch_rss_headlines()
         if not articles:
             raise RuntimeError("Hiçbir RSS kaynağından haber çekilemedi!")
@@ -122,7 +122,7 @@ class NewsIntelligenceAgent:
         selected = SelectedTopicSchema.model_validate_json(response.text)
         logger.info(f"Seçilen Konu: {selected.topic_id} (Skor: {selected.viral_score})")
 
-        if commit_to_history:
+        if auto_save_to_memory:
             self.save_to_history(selected)
 
         return selected
