@@ -14,6 +14,9 @@ from src import config
 
 log = logging.getLogger("makrokontext.history")
 DONE_STATUSES = {"uploaded", "produced"}
+# Zamanlanmış çalışmanın "bugün zaten üretildi" diye atlaması için yalnızca gerçekten yüklenmiş videolar sayılır;
+# dry-run ("produced") aynı günkü gerçek yüklemeyi engellememeli.
+SKIP_STATUSES = {"uploaded"}
 _STOP = {"der", "die", "das", "und", "the", "and", "von", "mit", "des", "den", "ein", "eine"}
 
 
@@ -87,7 +90,7 @@ def is_done_today(lang: str | None = None) -> bool:
     today = config.today_local_str()
     for it in load():
         status = it.get("status", "uploaded")  # eski kayıtlar yüklenmiş sayılır
-        if status in DONE_STATUSES and str(it.get("date", ""))[:10] == today:
+        if status in SKIP_STATUSES and str(it.get("date", ""))[:10] == today:
             if not lang or not it.get("language") or it["language"].lower() == lang.lower():
                 return True
     return False
