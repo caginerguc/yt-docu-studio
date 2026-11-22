@@ -96,5 +96,14 @@
     "language": "de",
     "status": "failed",
     "error": "list assignment index out of range"
+  },
+  {
+    "topic_id": "bernhard-riemann-unloesbares-raetsel",
+    "headline": "Das ungelöste Rätsel von Bernhard Riemann: Ein mathematisches Genie und seine Geheimnisse",
+    "wiki_main": "Bernhard Riemann",
+    "collection": "schatten_genies",
+    "date": "2026-11-22T14:53:41+01:00",
+    "language": "de",
+    "status": "produced"
   }
 ]
