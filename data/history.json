@@ -86,5 +86,15 @@
     "source_url": "https://news.google.com/rss/articles/CBMi0gFBVV95cUxPOFY1cDM1ajc5YmllMkFYcnR1aXNQOWlsM2pzSGdqbUJtVllKRE9zOC1BLV9NUFo3Q1lLaWxTdl9vRmZZcnJ2c0FtWmdxNk9KOURTMWwyM3FaQ0UyS0Foa2lqNy1CZmwtaHVjMWNZZDdhTWJ3UnZXNm0zVURFZGtNcDVoUThNbEtaUGNlSGpUcjY3T1JBSWlRTlVhby1ieXZTV1FLX01Da0Q0bmJIM0h2aHJmazhWZ3k2b0lUMUFfYVdKN01jdHJFb3hjRnJXb1JjUHc?oc=5",
     "language": "DE",
     "timestamp": "2026-10-24T06:01:29.790507+00:00"
+  },
+  {
+    "topic_id": "bernhard-riemann-hypothese-und-die-primzahlen",
+    "headline": "Bernhard Riemann: Das ungelöste Millionen-Rätsel der Mathematik",
+    "wiki_main": "Riemannsche Vermutung",
+    "collection": "schatten_genies",
+    "date": "2026-11-22T04:15:33+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "list assignment index out of range"
   }
 ]
