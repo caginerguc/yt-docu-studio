@@ -392,9 +392,12 @@ class VideoRenderer:
         blocks, n = [], 0
         for tm in self.timings:
             words = tm.sentence.text.split()
-            chunks = [words[i:i + SUB_MAX_WORDS] for i in range(0, len(words), SUB_MAX_WORDS)]
-            if len(chunks) > 1 and len(chunks[-1]) < 4:          # çok kısa son parça öncekiyle birleşsin
-                chunks[-2] += chunks.pop()
+            if not words:
+                continue
+            # Dengeli bölme: 13 kelime -> 7+6 (12+1 gibi tek kelimelik kuyruk oluşmaz)
+            parts = -(-len(words) // SUB_MAX_WORDS)
+            size = -(-len(words) // parts)
+            chunks = [words[i:i + size] for i in range(0, len(words), size)]
             total_chars = sum(len(" ".join(c)) for c in chunks) or 1
             t = tm.speech_start
             span = max(0.5, tm.end - tm.speech_start)

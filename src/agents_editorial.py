@@ -2,15 +2,18 @@
 
   Mimar        : 5 perdelik anlatı planı (video başına değişen anlatı yapısı, şablon izlenimini kırar)
   Başyazar     : perde perde yazar; her cümle kanıt etiketi (belegt/behauptet/spekulativ/ueberleitung) taşır
-  Eleştirmen   : acımasız puanlama, zayıf perdeleri geri gönderir (en fazla MAX_REVISIONS tur)
-  Doğrulayıcı  : kod (sayı/yıl kaynakta var mı) + LLM; desteklenmeyen cümle düzeltilir veya silinir
+  Eleştirmen   : acımasız puanlama, zayıf perdeleri geri gönderir (en fazla MAX_REVISIONS tur); BAĞIMSIZ HAKEM
+                 modeliyle (NVIDIA NIM) çalışır, en yüksek puanlı sürümü saklar (rewrite kötüleştirirse geri döner)
+  Doğrulayıcı  : kod (sayı/yıl kaynakta var mı) + LLM (yine bağımsız hakem); desteklenmeyen cümle düzeltilir veya silinir
   Sinematograf : cümle başına kesit planı (stok video / arşiv fotoğrafı / AI görsel)
   SEO          : başlık, kapak metni, etiketler, kaynak listesi
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
 import zlib
 from typing import Literal
 
@@ -19,10 +22,13 @@ from pydantic import BaseModel
 from src import config
 from src.agent_researcher import Dossier, ResearchAgent
 from src.grounding import numbers_in, numbers_missing
-from src.llm import LLM
+from src.llm import LLM, LLMError
+from src.llm_judge import JudgeLLM
 from src.plan import PlanAct, PlanSentence, PlanShot, ProductionPlan, SeoPlan, SourceRef
 
 log = logging.getLogger("makrokontext.editorial")
+
+CRITIC_PASS = int(os.environ.get("CRITIC_PASS", "8"))   # bu genel puan ve üstü: yayın kalitesi, rewrite yok
 
 Evidence = Literal["belegt", "behauptet", "spekulativ", "ueberleitung"]
 Pause = Literal["none", "short", "long"]
@@ -182,8 +188,10 @@ NARRATION_RULES = f"""NARRATION RULES
 
 # ----------------------------- Ekip ----------------------------------------- #
 class EditorialCrew:
-    def __init__(self, llm: LLM | None = None, lang_code: str | None = None):
+    def __init__(self, llm: LLM | None = None, lang_code: str | None = None, judge: JudgeLLM | None = None):
         self.llm = llm or LLM()
+        # Eleştirmen ve doğrulayıcı yazardan farklı model ailesiyle çalışır (anahtar yoksa Gemini'ye düşer).
+        self.judge = judge or JudgeLLM(self.llm)
         self.lang = config.get_lang(lang_code)
         self.system = ("You are the writing room of MakroKontext, a documentary channel in the tradition of Arte, "
                        f"Lemmino and Fern. Output language: {self.lang.name}. Accuracy beats drama.")
@@ -278,7 +286,9 @@ working_title: a precise, intriguing working title."""
 {NARRATION_RULES}
 
 WRITE ACT {act_cfg['id']}: '{act_cfg['name']}' — {act_cfg['goal']} {extra}
-WORD BUDGET: {budget} words (acceptable {int(budget * 0.7)}-{int(budget * 1.35)}).
+WORD BUDGET: {budget} words (acceptable {int(budget * 0.85)}-{int(budget * 1.35)}). That is about
+{round(budget / 15)} sentences: write AT LEAST {round(budget * 0.85 / 15)} sentences. Drafts that are too short are rejected,
+because the video must reach its target length; add documented detail, not filler.
 BEATS TO COVER:
 {chr(10).join('- ' + b for b in arc_act.beats)}
 END THE ACT BY OPENING THIS QUESTION: {arc_act.closing_question}
@@ -300,28 +310,35 @@ Return the sentences of this act only."""
     # -- 3. eleştirmen -------------------------------------------------------- #
     def critique(self, acts: list[PlanAct], d: Dossier) -> Critique:
         ids = {s.id for s in (x for a in acts for x in a.sentences)}
-
-        def validate(c: Critique) -> None:
-            if any(a not in range(1, 6) for a in c.acts_to_rewrite):
-                raise ValueError("acts_to_rewrite must contain act ids 1-5")
-            bad = [i.sentence_id for i in c.issues if i.sentence_id not in ids]
-            if bad:
-                raise ValueError(f"unknown sentence ids in issues: {bad[:5]}")
+        act_ids = {a.act_id for a in acts}
 
         prompt = f"""You are the merciless chief editor. Judge this documentary script (voice-over, {self.lang.name}).
+You did NOT write it. Do not be polite; an average script gets a 5.
 
+VERIFIED FACTS THE WRITERS WERE GIVEN (id | status | year | claim):
+{facts_block(d)}
+
+SCRIPT (sentence id [evidence|fact ids|pause] text):
 {script_view(acts)}
 
 SCORE 1-10 (be strict; 8 means broadcast quality): hook_score (do the first 30 seconds create a question the
 viewer must have answered?), pacing_score (rhythm, variety, no sag in the middle), clarity_score (easy to follow
 by ear, no jargon, no clutter), originality_score (fresh angle, no cliché, no generic AI phrasing), overall.
-List concrete issues (sentence_id, problem, fix). acts_to_rewrite: only acts scoring below 8 in your judgment
-(at most 3, worst first); empty list if the script is good."""
-        return self.llm.generate_json(prompt, Critique, system=self.system, temperature=0.3,
-                                      validate=None, label="critique")
+Also penalize: statements that go beyond the facts above, strong facts that were never used, repetitive sentence
+openings, stock phrases, rhetorical-question spam, a flat middle section, and a weak or moralizing ending.
+List concrete issues (sentence_id, problem, fix); sentence_id must be copied exactly from the script.
+acts_to_rewrite: only acts scoring below 8 in your judgment (at most 3, worst first); empty list if the script is good."""
+        c = self.judge.generate_json(prompt, Critique, system=self.system, temperature=0.3,
+                                     validate=None, label="critique")
+        # Reddetmek yerine temizle: farklı model ailesi geçersiz perde/cümle numarası döndürürse ek istek harcanmaz.
+        for name in ("hook_score", "pacing_score", "clarity_score", "originality_score", "overall"):
+            setattr(c, name, max(1, min(10, int(getattr(c, name)))))
+        c.acts_to_rewrite = [a for a in dict.fromkeys(c.acts_to_rewrite) if a in act_ids]
+        c.issues = [i for i in c.issues if i.sentence_id in ids]
+        return c
 
     # -- 4. doğrulayıcı ------------------------------------------------------- #
-    def fact_check(self, acts: list[PlanAct], d: Dossier) -> dict[str, int]:
+    def fact_check(self, acts: list[PlanAct], d: Dossier) -> dict[str, object]:
         corpus_nums = numbers_in(d.corpus(), min_digits=1)
         by_id = {s.id: s for a in acts for s in a.sentences}
         det = {sid: numbers_missing(s.text, corpus_nums) for sid, s in by_id.items()}
@@ -349,11 +366,19 @@ status allows, (c) contradicts a fact, or (d) contains a number/year not in the 
 For each flag give replacement_text: same language, same narrative function, at most 25 words, fixed by hedging,
 attributing or removing the unsupported detail; replacement_evidence: the correct label.
 Return an empty flags list if everything is supported."""
-        res = self.llm.generate_json(prompt, FactCheckResult, system=self.system, temperature=0.1,
-                                     validate=None, label="factcheck")
-        stats = {"flagged": len(set(det) | {f.sentence_id for f in res.flags}), "replaced": 0, "deleted": 0}
+        llm_check = "ok"
+        try:
+            res = self.judge.generate_json(prompt, FactCheckResult, system=self.system, temperature=0.1,
+                                           validate=validate, label="factcheck")
+        except LLMError as e:   # hakem de Gemini de çalışmadı: yalnızca kod tabanlı sayı kontrolü uygulanır
+            log.warning("LLM olgu denetimi çalışmadı, yalnızca sayı/yıl kontrolü uygulanıyor: %s", e)
+            res, llm_check = FactCheckResult(flags=[]), "skipped"
+        stats: dict[str, object] = {"flagged": len(set(det) | {f.sentence_id for f in res.flags}),
+                                    "replaced": 0, "deleted": 0, "llm_check": llm_check}
         unfixed: set[str] = set()
         for f in res.flags:
+            if f.sentence_id not in by_id:
+                continue
             s = by_id[f.sentence_id]
             new = clean_sentence(f.replacement_text) if f.replacement_text.strip() else ""
             if new and len(new.split()) <= config.MAX_SENTENCE_WORDS and not numbers_missing(new, corpus_nums):
@@ -377,9 +402,10 @@ Return an empty flags list if everything is supported."""
         ids = set(want)
 
         def validate(r: ActShots) -> None:
-            got = {x.sentence_id for x in r.sentences}
-            if got != ids:
-                raise ValueError(f"sentence_id mismatch; missing={sorted(ids - got)[:4]} unknown={sorted(got - ids)[:4]}")
+            # Küçük eksikler kodda tamamlanır; yalnızca cümlelerin üçte birinden fazlası eksikse model düzeltmeye zorlanır.
+            missing = ids - {x.sentence_id for x in r.sentences}
+            if len(missing) > len(ids) / 3:
+                raise ValueError(f"shots missing for sentences {sorted(missing)[:6]}; return every sentence_id")
 
         lines = "\n".join(f"{s.id} (needs {want[s.id]} shot(s)): {s.text}" for s in act.sentences)
         mix = config.SOURCE_MIX
@@ -398,13 +424,24 @@ For each sentence return EXACTLY the number of shots it needs. Each shot has a s
 - ai_image (~{int(mix['ai_image'] * 100)}%): atmospheric reconstruction. ai_prompt_en = one vivid scene description (composition, light,
   subject). Rules: never show a real, named person's face (use silhouettes, hands, back views, objects,
   architecture, landscapes); no readable text, no logos; do NOT add style words (a house style is appended later).
-Unused query fields must be empty strings. camera: vary the movement; match the mood (zoom_in for tension,
+stock_query_en is REQUIRED for EVERY shot, whatever its source: it is the fallback search when the primary
+source finds nothing (2-4 concrete English words describing what can be filmed). archive_query_en only for
+archive_photo, ai_prompt_en only for ai_image; otherwise empty strings. Prefer real footage: use ai_image only
+when nothing filmable or archival fits. camera: vary the movement; match the mood (zoom_in for tension,
 pan for reveals). Alternate source types so no more than 2 consecutive shots share a source."""
-        res = self.llm.generate_json(prompt, ActShots, system=self.system, temperature=0.6,
-                                     validate=None, label=f"shots-act{act.act_id}")
+        # Sinematograf yazar değil: NIM'de çalışır, Gemini'nin günlük kotası senaryoya kalır (anahtar yoksa Gemini).
+        res = self.judge.generate_json(prompt, ActShots, system=self.system, temperature=0.6, validate=validate,
+                                       max_output_tokens=6000, label=f"shots-act{act.act_id}")
         by_id = {x.sentence_id: x.shots for x in res.sentences}
+        prev: list[ShotOut] = []
         for s in act.sentences:
-            shots = list(by_id[s.id])
+            shots = list(by_id.get(s.id) or [])
+            if not shots:   # model bu cümleyi atladıysa: bir önceki cümlenin görüntü dilini sürdür
+                shots = [x.model_copy() for x in prev[-1:]] or [ShotOut(
+                    source="stock_video", stock_query_en="old documents desk candle", archive_query_en="",
+                    ai_prompt_en="old documents on a wooden desk lit by a single candle", camera="zoom_in")]
+                log.warning("Sinematograf %s için kesit vermedi; önceki kesit dili kullanıldı.", s.id)
+            prev = shots
             while len(shots) < want[s.id]:       # eksikse son kesiti farklı kamerayla çoğalt
                 dup = shots[-1].model_copy()
                 dup.camera = config.CAMERA_EFFECTS[(config.CAMERA_EFFECTS.index(dup.camera) + 1) % 4]
@@ -415,6 +452,15 @@ pan for reveals). Alternate source types so no more than 2 consecutive shots sha
 
     @staticmethod
     def finalize_shots(acts: list[PlanAct]) -> dict[str, float]:
+        # AI payı hedefi aşarsa fazlası (stok sorgusu olanlar) gerçek stok görüntüye çevrilir, videoya yayılarak.
+        every = [sh for a in acts for s in a.sentences for sh in s.shots]
+        ai = [sh for sh in every if sh.source == "ai_image" and sh.stock_query_en]
+        excess = sum(sh.source == "ai_image" for sh in every) - round(config.SOURCE_MIX["ai_image"] * len(every))
+        if excess > 0 and ai:
+            step = len(ai) / min(excess, len(ai))
+            for k in range(min(excess, len(ai))):
+                ai[int(k * step)].source = "stock_video"
+            log.info("AI payı hedefi aştı: %d kesit stok görüntüye çevrildi.", min(excess, len(ai)))
         prev = ""
         counts = {"stock_video": 0, "archive_photo": 0, "ai_image": 0}
         for a in acts:
@@ -472,9 +518,39 @@ TASK
 - thumbnail_prompt_en: ONE dramatic, high-contrast, dark background image: a single strong subject lit from the
   side, deep shadows, empty space on the left for text. No real person's face (silhouette, hands, object, door,
   document stack). No text in the image.
-- music_mood: choose the best fit. shorts_hook: one-line cliffhanger for a 45-second Short."""
-        o = self.llm.generate_json(prompt, SeoOut, system=self.system, temperature=0.7,
-                                   validate=None, label="seo")
+- music_mood: choose the best fit. shorts_hook: one-line cliffhanger for a 45-second Short.
+EVERGREEN: the video must still make sense in ten years. Title, description and tags must NOT refer to current
+events, today's news, AI hype or the trend that inspired the topic; package the timeless story itself."""
+        # SEO de NIM'de (Gemini kotası senaryoya kalır). Önce kurallarla iste; olmazsa serbest iste ve kodda düzelt.
+        try:
+            o = self.judge.generate_json(prompt, SeoOut, system=self.system, temperature=0.7,
+                                         validate=validate, label="seo")
+        except LLMError as e:
+            log.warning("SEO kurallara uygun üretilemedi, düzeltmeli üretim: %s", e)
+            o = self.judge.generate_json(prompt, SeoOut, system=self.system, temperature=0.7,
+                                         validate=None, label="seo-free")
+        return self._sanitize_seo(o, acts, arc)
+
+    @staticmethod
+    def _sanitize_seo(o: SeoOut, acts: list[PlanAct], arc: ArcPlan) -> SeoOut:
+        def cut(text: str, limit: int) -> str:
+            t = " ".join(text.split())
+            return t if len(t) <= limit else t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-–")
+
+        o.title = cut(o.title, 95)
+        if len(o.title) < 20 or any(b in o.title.lower() for b in config.TOPIC_BLOCKLIST):
+            o.title = cut(arc.working_title, 95)
+        names = [a.name for a in acts]
+        o.chapter_titles = [cut(c, 60) for c in o.chapter_titles if c.strip()][:len(acts)]
+        o.chapter_titles += names[len(o.chapter_titles):]
+        o.tags = list(dict.fromkeys(t.strip() for t in o.tags if t.strip()))[:15]
+        o.hashtags = [h if h.startswith("#") else f"#{h}" for h in (x.strip().replace(" ", "") for x in o.hashtags) if h][:3]
+        words = o.thumbnail_text.upper().split()
+        while words and (len(words) > 4 or len(" ".join(words)) > 26):
+            words.pop()
+        o.thumbnail_text = " ".join(words) or cut(arc.working_title.upper(), 26)
+        if any(b in o.thumbnail_text.lower() for b in config.TOPIC_BLOCKLIST):
+            o.thumbnail_text = cut(arc.working_title.upper(), 26)
         if "no text" not in o.thumbnail_prompt_en.lower():
             o.thumbnail_prompt_en += ", no text, no watermark"
         return o
@@ -498,14 +574,28 @@ TASK
             used |= {f for s in sents for f in s.fact_ids}
             tail = " ".join(s.text for s in sents[-3:])
 
+        log.info("NIM ekibi: %s", self.judge.describe())
         scores: dict = {}
-        for rnd in range(config.MAX_REVISIONS):
-            crit = self.critique(acts, d)
-            scores = crit.model_dump(exclude={"issues"})
-            log.info("Eleştirmen turu %d: genel=%d, yeniden yazılacak=%s", rnd + 1, crit.overall, crit.acts_to_rewrite)
-            if crit.overall >= 8 or not crit.acts_to_rewrite:
+        best: tuple[int, list[PlanAct], dict] | None = None
+        rounds = max(1, config.MAX_REVISIONS)
+        valid_acts = {a.act_id for a in acts}
+        # rounds kez yeniden yazım + her yazımdan sonra yeniden puanlama (son sürüm de denetlenir)
+        for rnd in range(rounds + 1):
+            try:
+                crit = self.critique(acts, d)
+            except LLMError as e:
+                log.warning("Eleştirmen çalışmadı, eldeki en iyi taslakla devam ediliyor: %s", e)
                 break
-            for act_id in crit.acts_to_rewrite[:3]:
+            cur = crit.model_dump(exclude={"issues"})
+            targets = [i for i in crit.acts_to_rewrite if i in valid_acts]
+            log.info("Eleştirmen turu %d: genel=%d (kanca %d, tempo %d, açıklık %d, özgünlük %d), yeniden yazılacak=%s",
+                     rnd + 1, crit.overall, crit.hook_score, crit.pacing_score, crit.clarity_score,
+                     crit.originality_score, targets)
+            if best is None or crit.overall > best[0]:
+                best = (crit.overall, copy.deepcopy(acts), cur)
+            if crit.overall >= CRITIC_PASS or not targets or rnd == rounds:
+                break
+            for act_id in targets[:3]:
                 act = next(a for a in acts if a.act_id == act_id)
                 fb = "\n".join(f"- {i.sentence_id}: {i.problem} -> {i.fix}" for i in crit.issues
                                if i.sentence_id.startswith(f"A{act_id}-"))
@@ -517,6 +607,10 @@ TASK
                                                prior_used, variant, feedback=fb or (crit.issues[0].fix if crit.issues else ""),
                                                previous=act.sentences)
                 renumber(acts)
+
+        if best is not None:   # en yüksek puanlı sürüm kalır; yeniden yazım kötüleştirdiyse eskisine dönülür
+            log.info("Kullanılan senaryo sürümü: genel puan %d", best[0])
+            acts, scores = best[1], best[2]
 
         stats = self.fact_check(acts, d)
         for a in acts:
@@ -540,6 +634,8 @@ TASK
             critique={**scores, "factcheck": stats, "source_mix": mix},
         )
         plan.recompute()
+        log.info("Model çağrıları: Gemini %d | NIM %d (son model: %s) | NIM->Gemini düşüş %d",
+                 getattr(self.llm, "calls", 0), self.judge.calls, self.judge.last_model or "-", self.judge.fallback_calls)
         log.info("Plan hazır: %d kelime, ~%.1f dk, %d kesit, %d cümle", plan.word_count, plan.est_minutes,
                  plan.shot_count(), len(plan.sentences()))
         return plan
