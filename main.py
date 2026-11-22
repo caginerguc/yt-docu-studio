@@ -1,73 +1,148 @@
-﻿import argparse
+﻿"""MakroKontext — uçtan uca otonom belgesel hattı.
+
+  1 Araştırma (kaynak doğrulamalı dossier)
+  2 Senaryo + kesit planı + SEO
+  3 Medya (anlatım sesi + arşiv/stok/AI görüntü)
+  4 Kapak
+  5 Render (FFmpeg)
+  6 YouTube yükleme (video + kapak + altyazı) ve konu hafızası
+
+Örnekler:
+  python main.py --lang de                       # tam çalıştırma, gizlilik UPLOAD_PRIVACY (varsayılan private)
+  python main.py --lang de --privacy unlisted
+  python main.py --dry-run                       # her şeyi üret, YouTube'a yükleme
+  python main.py --plan output/plan.json         # araştırma+senaryoyu atla, var olan planla devam et
+"""
+from __future__ import annotations
+
+import argparse
+import json
 import logging
-import shutil
-from src.config import OUTPUT_DIR, TARGET_LANGUAGE
-from src.agent_researcher import NewsIntelligenceAgent
-from src.agents_editorial import EditorialProductionCrew
-from src.media_generator import MediaGenerator
-from src.video_renderer import VideoRenderer
-from src.youtube_uploader import YouTubeUploader
+import sys
+import time
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("Main_Orchestrator")
+from src import config, history
 
+log = logging.getLogger("makrokontext.main")
 
-def clean_temp_directories():
-    """Yeni prodüksiyon öncesi önceki videonun sahne, ses ve klip kalıntılarını temizler."""
-    for folder in ["scenes", "audio", "clips"]:
-        dir_path = OUTPUT_DIR / folder
-        if dir_path.exists():
-            shutil.rmtree(dir_path)
-        dir_path.mkdir(parents=True, exist_ok=True)
+_MUSIC_LABEL = {"de": "Musik", "en": "Music", "tr": "Müzik"}
 
 
-def run_autonomous_studio(language: str, privacy: str, skip_upload: bool = False):
-    logger.info("==========================================================")
-    logger.info(f"🚀 OTONOM YOUTUBE BELGESEL STÜDYOSU BAŞLATILDI (DİL: {language})")
-    logger.info("==========================================================")
+def music_credits(paths: list[Path], lang: str) -> str:
+    """assets/music/classical_by/Eser__Sanatçı.mp3 -> atıf satırı (CC BY zorunluluğu)."""
+    lines = []
+    for p in dict.fromkeys(paths):          # aynı parça birden çok kez çalınabilir
+        if p.parent.name != "classical_by":
+            continue
+        work, _, artist = p.stem.partition("__")
+        work = work.replace("_", " ").replace("-", " ").strip()
+        artist = artist.replace("_", " ").strip() or "unbekannt"
+        lines.append(f"- {work} – {artist} (CC BY)")
+    return f"{_MUSIC_LABEL.get(lang, 'Music')}:\n" + "\n".join(lines) if lines else ""
 
-    clean_temp_directories()
 
-    # 1. AŞAMA: Haber Tarama & Seçim (Ajan 1)
-    agent1 = NewsIntelligenceAgent(language=language)
-    selected_topic = agent1.select_best_topic(auto_save_to_memory=True)
+def main() -> int:
+    ap = argparse.ArgumentParser(description="MakroKontext otonom belgesel stüdyosu")
+    ap.add_argument("--lang", default=config.DEFAULT_LANG, type=str.lower, choices=sorted(config.LANGS))
+    ap.add_argument("--privacy", default=config.UPLOAD_PRIVACY, type=str.lower,
+                    choices=["private", "unlisted", "public"])
+    ap.add_argument("--dry-run", action="store_true", help="YouTube'a yükleme yapma")
+    ap.add_argument("--skip-if-done", action="store_true", help="bugün bu dilde video yüklendiyse çık")
+    ap.add_argument("--plan", default=None, help="var olan plan.json ile devam et (1-2. aşamayı atla)")
+    args = ap.parse_args()
 
-    # 2. AŞAMA: Senaryo, Görsel Prompt, Müzik & SEO (Ajan 2, 3 ve 4)
-    crew = EditorialProductionCrew(language=language)
-    plan = crew.create_production_plan(selected_topic, save_to_disk=True)
+    config.ensure_dirs()
+    config.setup_logging()
+    upload = config.UPLOAD_ENABLED and not args.dry_run
 
-    # 3. AŞAMA: 16:9 Flux Görsel & Edge-TTS Ses/Altyazı Üretimi
-    media_gen = MediaGenerator(plan)
-    media_gen.run_pipeline()
+    errors, warnings = config.validate(upload=upload)
+    for w in warnings:
+        log.warning("Uyarı: %s", w)
+    if errors:
+        for e in errors:
+            log.error("Kritik: %s", e)
+        return 2
+    if args.skip_if_done and history.is_done_today(args.lang):
+        log.info("Bugün %s dilinde zaten video üretildi; çıkılıyor.", args.lang)
+        return 0
 
-    # 4. AŞAMA: FFmpeg 1080p Ken Burns, -24dB Miksaj & Altyazı Gömme
-    renderer = VideoRenderer(plan)
-    final_video = renderer.render_full_video()
-    thumbnail_img = OUTPUT_DIR / "thumbnail.jpg"
+    t0 = time.monotonic()
+    plan = None
+    try:
+        from src.agents_editorial import build_description
+        from src.plan import ProductionPlan
 
-    # 5. AŞAMA: YouTube Data API v3 Yükleme
-    if skip_upload:
-        logger.info("Skip-upload aktif: YouTube yüklemesi atlandı.")
-        return
+        # 1-2) Araştırma + senaryo
+        if args.plan:
+            plan = ProductionPlan.load(Path(args.plan))
+            log.info("Var olan plan kullanılıyor: %s", plan.working_title)
+        else:
+            from src.agent_researcher import ResearchAgent
+            from src.agents_editorial import EditorialCrew
+            from src.llm import LLM
 
-    uploader = YouTubeUploader()
-    if uploader.is_configured():
-        video_id = uploader.upload_documentary(
-            video_path=final_video,
-            thumbnail_path=thumbnail_img,
-            plan=plan,
-            privacy_status=privacy
-        )
-        logger.info(f"🎉 SÜREÇ TAMAMLANDI! Yayındaki Video: https://youtu.be/{video_id}")
-    else:
-        logger.warning("YouTube API kimlik bilgileri tanımlı değil, video yalnızca yerel diske kaydedildi.")
+            log.info("=== MakroKontext başladı (dil: %s, gizlilik: %s) ===", args.lang, args.privacy)
+            llm = LLM()
+            dossier = ResearchAgent(llm, args.lang).run()
+            plan = EditorialCrew(llm, args.lang).produce(dossier)
+            plan.save()
+            log.info("Plan: '%s' — %d kelime, ~%.1f dk, %d kesit", plan.seo.title, plan.word_count,
+                     plan.est_minutes, plan.shot_count())
+
+        # 3) Medya
+        from src.media_generator import MediaGenerator
+        MediaGenerator(plan).run()
+
+        # 4) Kapak
+        from src.thumbnail import build_thumbnails
+        thumb: Path | None = None
+        bg = config.SCENES_DIR / "thumb_bg.jpg"
+        if bg.exists():
+            thumbs = build_thumbnails(bg, plan.seo.thumbnail_text, plan.seo.thumbnail_tag)
+            thumb = thumbs[0] if thumbs else None
+
+        # 5) Render
+        from src.video_renderer import VideoRenderer
+        renderer = VideoRenderer(plan)
+        video = renderer.render()
+
+        # Açıklama: giriş + bölümler + kaynaklar + (CC BY müzik atfı) + yapay zekâ beyanı + hashtag
+        starts = [t for t, _ in renderer.chapters]
+        description = build_description(plan, starts if renderer.chapters_path.read_text().strip() else None)
+        credits = music_credits(renderer.music_paths, plan.language)
+        if credits:
+            description = description + "\n\n" + credits
+        meta = {"title": plan.seo.title, "description": description, "tags": plan.seo.tags,
+                "video": str(video), "thumbnail": str(thumb) if thumb else None,
+                "subtitles": str(renderer.srt_path), "privacy": args.privacy, "topic_id": plan.topic_id}
+        config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 6) Yükleme
+        if not upload:
+            history.set_status(plan.topic_id, "produced")
+            log.info("Yükleme kapalı (dry-run). Video: %s", video)
+        else:
+            from src.youtube_uploader import VideoMeta, YouTubeUploader
+            up = YouTubeUploader()
+            vid = up.upload_video(video, VideoMeta(plan.seo.title, description, plan.seo.tags,
+                                                   plan.language, args.privacy))
+            up.set_thumbnail(vid, thumb)
+            up.add_captions(vid, renderer.srt_path, plan.language)
+            history.set_status(plan.topic_id, "uploaded", video_id=vid, url=f"https://youtu.be/{vid}",
+                               privacy=args.privacy)
+            meta["video_id"] = vid
+            config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        log.info("=== Tamamlandı: %.1f dk ===", (time.monotonic() - t0) / 60)
+        return 0
+
+    except Exception as e:
+        log.exception("Üretim başarısız: %s", e)
+        if plan is not None:
+            history.set_status(plan.topic_id, "failed", error=str(e)[:300])
+        return 1
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Otonom YouTube Belgesel Stüdyosu Orkestratörü")
-    parser.add_argument("--lang", type=str, default=TARGET_LANGUAGE, help="Hedef dil: DE, EN veya TR")
-    parser.add_argument("--privacy", type=str, default="public", choices=["private", "unlisted", "public"], help="YouTube gizlilik ayarı")
-    parser.add_argument("--skip-upload", action="store_true", help="YouTube'a yüklemeden sadece videoyu üretir")
-    args = parser.parse_args()
-
-    run_autonomous_studio(language=args.lang.upper(), privacy=args.privacy, skip_upload=args.skip_upload)
+    sys.exit(main())

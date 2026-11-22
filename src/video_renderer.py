@@ -1,247 +1,446 @@
-﻿import json
+﻿"""Aşama 5 — Sinematik kurgu (FFmpeg).
+
+Girdi : ProductionPlan + output/audio/<sentence_id>.mp3 + output/scenes/<sentence_id>_shot<N>.(mp4|jpg)
+Çıktı : output/final_documentary.mp4, output/subtitles.srt, output/chapters.txt
+
+Akış
+  1. Her cümle için anlatım segmenti = [duraklama sessizliği + cümle sesi]  (WAV, 48 kHz)
+     -> gerçek süreler ölçülür; görüntü bu sürelere kare hassasiyetinde bağlanır (kayma yok).
+  2. Her kesit ayrı klip olarak üretilir (paralel, önbellekli):
+       * stok video  : 1080p'ye ölçek/kırp, gerekirse döngü
+       * durağan     : dikey/kare arşiv fotoğrafı bulanık arka plan üzerine oturtulur (kafa kesilmez),
+                       4K supersample üzerinden titremesiz Ken Burns (zoom / pan)
+       * ortak görünüm: hafif kontrast, düşük doygunluk, film greni, vinyet
+       * perde başları: siyahtan açılış; perde sonları: siyaha kararma
+  3. Klipler yeniden kodlamadan birleştirilir (concat demuxer).
+  4. Ses: anlatım + klasik müzik (kısık, konuşmada otomatik "ducking", fade in/out) -> -14 LUFS.
+  5. Altyazı (SRT) ve YouTube bölüm zaman damgaları üretilir.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
 import logging
-import re
+import os
+import random
+import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
-from src.config import OUTPUT_DIR, MUSIC_DIR
-from src.agents_editorial import ProductionPlanSchema
+from PIL import Image, ImageFilter
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("Stage4_CinematicRenderer")
+from src import config
+from src.plan import PlanSentence, ProductionPlan
+
+log = logging.getLogger("makrokontext.renderer")
+
+FPS = config.FPS
+W, H = config.VIDEO_W, config.VIDEO_H
+SR = 48000
+INTRO_S = 0.8                    # ilk cümleden önce
+OUTRO_S = 4.0                    # son cümleden sonra (müzik + kararma)
+ACT_BREAK_S = 0.9                # yeni perde başında ek nefes
+SHORT_PAUSE_S = 0.35             # pause_before == "short" için ek
+FADE_S = config.CROSSFADE_S      # perde geçişlerinde siyaha kararma/açılma
+KB_ZOOM = 0.12                   # Ken Burns yakınlaşma miktarı
+MUSIC_EXTS = (".mp3", ".mpga", ".ogg", ".oga", ".flac", ".wav", ".m4a", ".opus")
+LOOK = "eq=contrast=1.06:brightness=-0.02:saturation=0.86,noise=alls=5:allf=t,vignette=PI/5"
+X264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-r", str(FPS), "-g", str(FPS * 2), "-video_track_timescale", str(FPS * 1000)]
+SUB_MAX_WORDS = 12
+# Müzik yatağı kaydın kendi seviyesinden bağımsız olarak bu yüksekliğe getirilir; anlatım ~-14 LUFS.
+# -30 = konuşmanın ~14 dB altı (aralarda duyulur, konuşmada ayrıca kısılır). Daha kısık için -32.
+MUSIC_LUFS = float(os.environ.get("MUSIC_LUFS", "-30"))
+
+
+class RenderError(RuntimeError):
+    pass
+
+
+@dataclass
+class ShotJob:
+    key: str
+    src: Path
+    is_video: bool
+    frames: int
+    camera: str
+    fade_in: float
+    fade_out: float
+    out: Path
+
+
+@dataclass
+class SentenceTiming:
+    sentence: PlanSentence
+    start: float          # segment başlangıcı (duraklama dahil), saniye
+    speech_start: float   # konuşmanın başladığı an
+    end: float
+
+
+def _run(cmd: list[str], what: str) -> None:
+    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        tail = "\n".join(res.stderr.strip().splitlines()[-12:])
+        raise RenderError(f"FFmpeg hatası ({what}), kod {res.returncode}:\n{tail}")
+
+
+def probe_duration(path: Path) -> float:
+    res = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        return float(res.stdout.strip())
+    except ValueError as e:
+        raise RenderError(f"Süre okunamadı: {path.name} ({res.stderr.strip()[:200]})") from e
+
+
+def _fmt_srt(t: float) -> str:
+    ms = int(round(t * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _fmt_chapter(t: float) -> str:
+    t = int(t)
+    h, rem = divmod(t, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
 class VideoRenderer:
-    def __init__(self, plan: ProductionPlanSchema):
+    def __init__(self, plan: ProductionPlan):
         self.plan = plan
-        self.scenes_dir = OUTPUT_DIR / "scenes"
-        self.audio_dir = OUTPUT_DIR / "audio"
-        self.clips_dir = OUTPUT_DIR / "clips"
-        self.clips_dir.mkdir(parents=True, exist_ok=True)
-        self.final_video_path = OUTPUT_DIR / "final_documentary.mp4"
-        self.master_srt_path = OUTPUT_DIR / "master_subtitles.srt"
+        self.clips_dir = config.CLIPS_DIR
+        self.work_dir = config.CACHE_DIR / "render"
+        for d in (self.clips_dir, self.work_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        self.final_video = config.OUTPUT_DIR / "final_documentary.mp4"
+        self.srt_path = config.OUTPUT_DIR / "subtitles.srt"
+        self.chapters_path = config.OUTPUT_DIR / "chapters.txt"
+        self.chapters: list[tuple[float, str]] = []
+        self.timings: list[SentenceTiming] = []
+        self.duration = 0.0
+        self.music_used: list[str] = []
+        self.music_paths: list[Path] = []
+        self._rng = random.Random(int(hashlib.sha1(plan.topic_id.encode()).hexdigest()[:8], 16))
 
-    def get_audio_duration(self, audio_path: Path) -> float:
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        return float(res.stdout.strip())
+    # ================================================================== #
+    # 1) Anlatım segmentleri
+    # ================================================================== #
+    def _gap_before(self, s: PlanSentence, first_in_act: bool, first_overall: bool) -> float:
+        if first_overall:
+            return INTRO_S
+        gap = config.SENTENCE_GAP_S
+        if s.pause_before == "short":
+            gap += SHORT_PAUSE_S
+        elif s.pause_before == "long":
+            gap += config.TWIST_GAP_S
+        if first_in_act:
+            gap += ACT_BREAK_S
+        return gap
 
-    def ensure_valid_image(self, image_path: Path):
-        if not image_path.exists() or image_path.stat().st_size < 5000:
-            subprocess.run([
-                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=#0c1017:s=1920x1080:d=1",
-                "-frames:v", "1", str(image_path)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    def build_narration(self) -> Path:
+        segs: list[Path] = []
+        t = 0.0
+        first_overall = True
+        for act in self.plan.acts:
+            for i, s in enumerate(act.sentences):
+                src = config.AUDIO_DIR / f"{s.id}.mp3"
+                if not src.exists():
+                    raise RenderError(f"Anlatım sesi eksik: {src.name} (media_generator çalıştı mı?)")
+                gap = self._gap_before(s, i == 0, first_overall)
+                seg = self.work_dir / f"seg_{s.id}.wav"
+                _run(["ffmpeg", "-y", "-f", "lavfi", "-t", f"{gap:.3f}", "-i", f"anullsrc=r={SR}:cl=mono",
+                      "-i", str(src), "-filter_complex",
+                      f"[1:a]aresample={SR},aformat=channel_layouts=mono,"
+                      "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
+                      "silenceremove=start_periods=1:start_threshold=-50dB,areverse[v];"
+                      "[0:a][v]concat=n=2:v=0:a=1[a]",
+                      "-map", "[a]", "-c:a", "pcm_s16le", str(seg)], f"segment {s.id}")
+                d = probe_duration(seg)
+                if i == 0:
+                    self.chapters.append((t, act.chapter_title or act.name))
+                self.timings.append(SentenceTiming(s, t, t + gap, t + d))
+                t += d
+                segs.append(seg)
+                first_overall = False
+        tail = self.work_dir / "tail.wav"
+        _run(["ffmpeg", "-y", "-f", "lavfi", "-t", f"{OUTRO_S:.3f}", "-i", f"anullsrc=r={SR}:cl=mono",
+              "-c:a", "pcm_s16le", str(tail)], "tail")
+        segs.append(tail)
+        self.duration = t + OUTRO_S
 
-    def _build_cinematic_filter(self, effect: str, duration: float, fps: int = 30) -> str:
-        frames = max(int(duration * fps), 30)
-        if effect == "zoom_in":
-            z_expr = f"min(zoom+{0.14/frames:.6f},1.14)"
-            x_expr, y_expr = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
-        elif effect == "zoom_out":
-            z_expr = f"if(eq(on,1),1.14,max(1.0,zoom-{0.14/frames:.6f}))"
-            x_expr, y_expr = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
-        elif effect == "pan_left_to_right":
-            z_expr = "1.12"
-            x_expr = f"(iw-iw/zoom)*(on/{frames})"
-            y_expr = "ih/2-(ih/zoom/2)"
+        lst = self.work_dir / "narration.txt"
+        lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in segs), encoding="utf-8")
+        out = self.work_dir / "narration.wav"
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c:a", "pcm_s16le", str(out)],
+             "narration concat")
+        log.info("Anlatım hazır: %d cümle, %.1f dk", len(self.timings), self.duration / 60)
+        return out
+
+    # ================================================================== #
+    # 2) Kesit klipleri
+    # ================================================================== #
+    def _shot_source(self, sid: str, idx: int) -> tuple[Path, bool]:
+        vid = config.SCENES_DIR / f"{sid}_shot{idx}.mp4"
+        img = config.SCENES_DIR / f"{sid}_shot{idx}.jpg"
+        if vid.exists() and vid.stat().st_size > 100_000:
+            return vid, True
+        if img.exists() and img.stat().st_size > config.MIN_IMAGE_BYTES:
+            return img, False
+        fallback = self.work_dir / "black.jpg"
+        if not fallback.exists():
+            Image.new("RGB", (W, H), (12, 14, 18)).save(fallback, "JPEG", quality=90)
+        log.warning("Kesit görseli eksik, siyah kare: %s_shot%d", sid, idx)
+        return fallback, False
+
+    def _plan_jobs(self) -> list[ShotJob]:
+        jobs: list[ShotJob] = []
+        n_t = len(self.timings)
+        act_last = {}
+        for k, tm in enumerate(self.timings):
+            act_last[tm.sentence.act_id] = k
+        for k, tm in enumerate(self.timings):
+            s = tm.sentence
+            end = self.duration if k == n_t - 1 else tm.end       # son cümle outro'yu kapsar
+            f0, f1 = round(tm.start * FPS), round(end * FPS)
+            shots = s.shots or []
+            n = max(1, len(shots))
+            bounds = [f0 + round((f1 - f0) * j / n) for j in range(n + 1)]
+            first_of_act = k == 0 or self.timings[k - 1].sentence.act_id != s.act_id
+            last_of_act = act_last[s.act_id] == k
+            for j in range(n):
+                cam = shots[j].camera if j < len(shots) else "zoom_in"
+                src, is_vid = self._shot_source(s.id, j + 1)
+                frames = max(1, bounds[j + 1] - bounds[j])
+                fi = (1.2 if k == 0 else FADE_S) if (first_of_act and j == 0) else 0.0
+                fo = (2.5 if k == n_t - 1 else FADE_S) if (last_of_act and j == n - 1) else 0.0
+                h = hashlib.sha1(f"{src.name}|{src.stat().st_size}|{frames}|{cam}|{fi}|{fo}|v2".encode()).hexdigest()[:10]
+                jobs.append(ShotJob(f"{s.id}_{j + 1}", src, is_vid, frames, cam, fi, fo,
+                                    self.clips_dir / f"{s.id}_shot{j + 1}_{h}.mp4"))
+        return jobs
+
+    def _prepare_still(self, src: Path) -> Path:
+        """Her durağanı 3840x2160'a getirir; en-boy oranı farklıysa bulanık arka plan + ortalanmış ön plan."""
+        out = self.work_dir / f"still_{src.stem}_{src.stat().st_size}.jpg"
+        if out.exists():
+            return out
+        tw, th = config.KB_SUPERSAMPLE_W, config.KB_SUPERSAMPLE_H
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            ratio = im.width / im.height
+            if abs(ratio - tw / th) / (tw / th) < 0.18:            # neredeyse 16:9 -> kırparak doldur
+                scale = max(tw / im.width, th / im.height)
+                im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
+                l, t = (im.width - tw) // 2, (im.height - th) // 2
+                canvas = im.crop((l, t, l + tw, t + th))
+            else:                                                   # portre/kare -> kafa kesilmesin
+                bg_scale = max(tw / im.width, th / im.height)
+                bg = im.resize((round(im.width * bg_scale), round(im.height * bg_scale)), Image.BILINEAR)
+                l, t = (bg.width - tw) // 2, (bg.height - th) // 2
+                bg = bg.crop((l, t, l + tw, t + th)).filter(ImageFilter.GaussianBlur(60))
+                bg = Image.eval(bg, lambda v: int(v * 0.45))
+                fg_scale = min(tw * 0.92 / im.width, th * 0.92 / im.height)
+                fg = im.resize((round(im.width * fg_scale), round(im.height * fg_scale)), Image.LANCZOS)
+                bg.paste(fg, ((tw - fg.width) // 2, (th - fg.height) // 2))
+                canvas = bg
+            canvas.save(out, "JPEG", quality=93)
+        return out
+
+    def _kenburns(self, cam: str, frames: int) -> str:
+        n = max(frames - 1, 1)
+        p = f"(on/{n})"
+        if cam == "zoom_out":
+            z, x, y = f"{1 + KB_ZOOM}-{KB_ZOOM}*{p}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+        elif cam == "pan_left_to_right":
+            z, x, y = f"{1 + KB_ZOOM * 0.8}", f"(iw-iw/zoom)*{p}", "ih/2-(ih/zoom/2)"
+        elif cam == "pan_right_to_left":
+            z, x, y = f"{1 + KB_ZOOM * 0.8}", f"(iw-iw/zoom)*(1-{p})", "ih/2-(ih/zoom/2)"
+        else:  # zoom_in
+            z, x, y = f"1+{KB_ZOOM}*{p}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+        return f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS}"
+
+    def _fades(self, job: ShotJob) -> str:
+        dur = job.frames / FPS
+        parts = []
+        if job.fade_in > 0:
+            parts.append(f"fade=t=in:st=0:d={min(job.fade_in, dur / 2):.3f}")
+        if job.fade_out > 0:
+            d = min(job.fade_out, dur / 2)
+            parts.append(f"fade=t=out:st={dur - d:.3f}:d={d:.3f}")
+        return ("," + ",".join(parts)) if parts else ""
+
+    def _render_job(self, job: ShotJob) -> Path:
+        if job.out.exists() and job.out.stat().st_size > 1000:
+            return job.out
+        tmp = job.out.with_suffix(".part.mp4")
+        dur = job.frames / FPS
+        if job.is_video:
+            src_d = probe_duration(job.src)
+            start = 0.0
+            if src_d > dur + 1.0:      # uzun klipte her seferinde baştan başlama: rastgele ama tekrarlanabilir kesit
+                start = random.Random(job.key).uniform(0, min(src_d - dur - 0.5, src_d * 0.5))
+            vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
+                  f"{LOOK}{self._fades(job)},format=yuv420p")
+            cmd = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-stream_loop", "-1", "-i", str(job.src),
+                   "-vf", vf, "-frames:v", str(job.frames), "-an", *X264, "-threads", "2", str(tmp)]
         else:
-            z_expr = "1.12"
-            x_expr = f"(iw-iw/zoom)*(1-on/{frames})"
-            y_expr = "ih/2-(ih/zoom/2)"
+            still = self._prepare_still(job.src)
+            vf = f"{self._kenburns(job.camera, job.frames)},setsar=1,{LOOK}{self._fades(job)},format=yuv420p"
+            cmd = ["ffmpeg", "-y", "-i", str(still), "-vf", vf, "-frames:v", str(job.frames),
+                   "-an", *X264, "-threads", "2", str(tmp)]
+        _run(cmd, f"klip {job.key} ({dur:.1f} sn)")
+        tmp.replace(job.out)
+        return job.out
 
-        # 4K Supersample Zoompan + Sinematik Noir Kontrast + 35mm Film Grain + Vignette (Köşe Karartma) + Fade
-        fade_out_start = max(0.1, duration - 0.35)
-        return (
-            f"scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160,"
-            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s=1920x1080:fps={fps},"
-            f"eq=contrast=1.08:brightness=-0.03:saturation=0.88,"
-            f"noise=alls=6:allf=t+u,"
-            f"vignette=PI/4,"
-            f"fade=t=in:st=0:d=0.35,fade=t=out:st={fade_out_start:.2f}:d=0.35,"
-            f"format=yuv420p"
-        )
+    def render_clips(self, jobs: list[ShotJob]) -> list[Path]:
+        workers = max(1, min(4, (os.cpu_count() or 2) // 2 or 1))
+        log.info("%d kesit klibi işleniyor (%d paralel iş)...", len(jobs), workers)
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            outs = list(ex.map(self._render_job, jobs))
+        log.info("Klipler hazır (%.1f dk).", (time.monotonic() - t0) / 60)
+        return outs
 
-    def render_scene_clip(self, scene_num: int, effects: List[str]) -> float:
-        audio_path = self.audio_dir / f"scene_{scene_num}.mp3"
-        output_clip = self.clips_dir / f"clip_{scene_num}.mp4"
+    def concat_video(self, clips: list[Path]) -> Path:
+        lst = self.work_dir / "clips.txt"
+        lst.write_text("".join(f"file '{c.resolve().as_posix()}'\n" for c in clips), encoding="utf-8")
+        out = self.work_dir / "video_only.mp4"
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)],
+             "video concat")
+        return out
 
-        total_duration = self.get_audio_duration(audio_path) + 0.40
-        shot_images = sorted(self.scenes_dir.glob(f"scene_{scene_num}_*.jpg"))
-        if not shot_images:
-            single = self.scenes_dir / f"scene_{scene_num}.jpg"
-            self.ensure_valid_image(single)
-            shot_images = [single]
+    # ================================================================== #
+    # 3) Müzik
+    # ================================================================== #
+    def pick_music(self, need_s: float) -> list[Path]:
+        """Havuz sırası: assets/music/<mood>/  ->  classical/ + classical_by/  ->  assets/music/ kökü."""
+        mood = getattr(self.plan.seo, "music_mood", "") or ""
 
-        num_shots = len(shot_images)
-        shot_duration = total_duration / num_shots
-        sub_clips = []
+        def files(*dirs: Path) -> list[Path]:
+            return sorted(p for d in dirs if d.is_dir() for p in d.iterdir()
+                          if p.is_file() and p.suffix.lower() in MUSIC_EXTS)
 
-        logger.info(f"Sahne {scene_num} ({num_shots} kamera açısı, {total_duration:.1f}s) 35mm Noir filtreyle işleniyor...")
+        pool: list[Path] = []
+        for group in ((config.MUSIC_DIR / mood,) if mood else (),
+                      (config.MUSIC_DIR / "classical", config.MUSIC_DIR / "classical_by"),
+                      (config.MUSIC_DIR,)):
+            pool = files(*group)
+            if pool:
+                break
+        if not pool:
+            return []
+        self._rng.shuffle(pool)
+        chosen, total = [], 0.0
+        while total < need_s and len(chosen) < 12:
+            p = pool[len(chosen) % len(pool)]
+            d = probe_duration(p)
+            if d < 20:
+                if len(pool) == 1:
+                    break
+                pool.remove(p)
+                continue
+            chosen.append(p)
+            total += d - 4.0
+        return chosen
 
-        for i, img_path in enumerate(shot_images):
-            self.ensure_valid_image(img_path)
-            sub_clip = self.clips_dir / f"clip_{scene_num}_shot_{i+1}.mp4"
-            eff = effects[i % len(effects)] if effects else "zoom_in"
-            vf = self._build_cinematic_filter(eff, shot_duration)
+    def mix_audio(self, narration: Path) -> Path:
+        out = self.work_dir / "mix.m4a"
+        tracks = self.pick_music(self.duration)
+        self.music_used = [p.name for p in tracks]
+        self.music_paths = tracks
+        T = self.duration
+        loud = "loudnorm=I=-14:TP=-1.5:LRA=11"
+        if not tracks:
+            log.warning("assets/music içinde müzik yok: yalnızca anlatım kullanılacak.")
+            _run(["ffmpeg", "-y", "-i", str(narration), "-af", f"aresample={SR},{loud}",
+                  "-ac", "2", "-c:a", "aac", "-b:a", "192k", str(out)], "audio (müziksiz)")
+            return out
+        log.info("Müzik: %s", ", ".join(self.music_used))
+        inputs: list[str] = ["-i", str(narration)]
+        for p in tracks:
+            inputs += ["-i", str(p)]
+        norm = f"aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo"
+        fc = [f"[0:a]{norm},asplit=2[voice][key]"]
+        labels = []
+        for i in range(1, len(tracks) + 1):
+            fc.append(f"[{i}:a]{norm}[m{i}]")
+            labels.append(f"[m{i}]")
+        cur = labels[0]
+        for i, lab in enumerate(labels[1:], 2):           # parçalar arasında 4 sn yumuşak geçiş
+            fc.append(f"{cur}{lab}acrossfade=d=4:c1=tri:c2=tri[x{i}]")
+            cur = f"[x{i}]"
+        fc.append(f"{cur}aloop=loop=-1:size=2147483647,atrim=0:{T:.3f},"
+                  f"loudnorm=I={MUSIC_LUFS}:TP=-8:LRA=14,aresample={SR},"
+                  f"afade=t=in:d=3,afade=t=out:st={max(0.0, T - 5):.3f}:d=5[bed]")
+        # Konuşma varken müzik otomatik kısılır (ducking); cümle aralarında yavaşça geri gelir.
+        fc.append("[bed][key]sidechaincompress=threshold=0.015:ratio=6:attack=40:release=900:makeup=1[duck]")
+        fc.append(f"[voice][duck]amix=inputs=2:duration=first:normalize=0,{loud}[out]")
+        _run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(fc), "-map", "[out]",
+              "-t", f"{T:.3f}", "-c:a", "aac", "-b:a", "192k", str(out)], "audio mix")
+        return out
 
-            cmd_shot = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", str(img_path),
-                "-vf", vf,
-                "-t", f"{shot_duration:.2f}",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-an", str(sub_clip)
-            ]
-            subprocess.run(cmd_shot, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-            sub_clips.append(sub_clip)
+    # ================================================================== #
+    # 4) Altyazı ve bölümler
+    # ================================================================== #
+    def write_srt(self) -> Path:
+        blocks, n = [], 0
+        for tm in self.timings:
+            words = tm.sentence.text.split()
+            chunks = [words[i:i + SUB_MAX_WORDS] for i in range(0, len(words), SUB_MAX_WORDS)]
+            if len(chunks) > 1 and len(chunks[-1]) < 4:          # çok kısa son parça öncekiyle birleşsin
+                chunks[-2] += chunks.pop()
+            total_chars = sum(len(" ".join(c)) for c in chunks) or 1
+            t = tm.speech_start
+            span = max(0.5, tm.end - tm.speech_start)
+            for c in chunks:
+                txt = " ".join(c)
+                d = span * len(txt) / total_chars
+                n += 1
+                if len(txt) > 42:                                  # iki satıra böl
+                    mid = len(c) // 2
+                    txt = " ".join(c[:mid]) + "\n" + " ".join(c[mid:])
+                blocks.append(f"{n}\n{_fmt_srt(t)} --> {_fmt_srt(t + d - 0.05)}\n{txt}\n")
+                t += d
+        self.srt_path.write_text("\n".join(blocks), encoding="utf-8")
+        return self.srt_path
 
-        # Alt çekimleri (shot) tek bir sahne videosunda birleştir ve sesi + geçiş sub-bass vuruşunu ekle
-        shot_list_file = self.clips_dir / f"shots_{scene_num}.txt"
-        with open(shot_list_file, "w", encoding="utf-8") as f:
-            for sc in sub_clips:
-                f.write(f"file '{sc.resolve().as_posix()}'\n")
+    def write_chapters(self) -> Path:
+        lines = [f"{_fmt_chapter(t if i else 0)} {title}" for i, (t, title) in enumerate(self.chapters)]
+        valid = len(self.chapters) >= 3 and all(b[0] - a[0] >= 10 for a, b in zip(self.chapters, self.chapters[1:]))
+        self.chapters_path.write_text("\n".join(lines) if valid else "", encoding="utf-8")
+        return self.chapters_path
 
-        cmd_merge = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(shot_list_file),
-            "-i", str(audio_path),
-            "-filter_complex", "[1:a]apad=pad_dur=0.40[aout]",
-            "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{total_duration:.2f}",
-            str(output_clip)
-        ]
-        subprocess.run(cmd_merge, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-        return total_duration
-
-    def _shift_srt_timestamps(self, srt_content: str, offset_sec: float) -> str:
-        def parse_time(t_str: str) -> float:
-            h, m, s_ms = t_str.split(":")
-            s, ms = s_ms.split(",")
-            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
-
-        def format_time(sec: float) -> str:
-            h = int(sec // 3600)
-            m = int((sec % 3600) // 60)
-            s = int(sec % 60)
-            ms = int(round((sec - int(sec)) * 1000))
-            if ms >= 1000:
-                s += 1
-                ms -= 1000
-            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-        pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})")
-        return pattern.sub(lambda m: f"{format_time(parse_time(m.group(1)) + offset_sec)} --> {format_time(parse_time(m.group(2)) + offset_sec)}", srt_content)
-
-    def build_master_srt(self, durations: List[float]):
-        master_blocks = []
-        current_offset = 0.0
-        counter = 1
-
-        for idx, scene in enumerate(self.plan.scenes):
-            srt_file = self.audio_dir / f"scene_{scene.scene_number}.srt"
-            if srt_file.exists():
-                raw = srt_file.read_text(encoding="utf-8").strip()
-                shifted = self._shift_srt_timestamps(raw, current_offset)
-                for block in re.split(r"\n\s*\n", shifted):
-                    lines = block.strip().splitlines()
-                    if len(lines) >= 2:
-                        time_line = lines[1] if "-->" in lines[1] else lines[0]
-                        text_lines = lines[2:] if "-->" in lines[1] else lines[1:]
-                        master_blocks.append(f"{counter}\n{time_line}\n" + "\n".join(text_lines))
-                        counter += 1
-            current_offset += durations[idx]
-
-        self.master_srt_path.write_text("\n\n".join(master_blocks) + "\n", encoding="utf-8")
-
-    def ensure_background_music(self, total_duration: float) -> Path:
-        chosen = self.plan.supervision.background_music
-        if not chosen or chosen == "none":
-            chosen = "cinematic_tension.mp3"
-
-        real_mp3 = MUSIC_DIR / chosen
-        if real_mp3.exists() and real_mp3.stat().st_size > 20000:
-            return real_mp3
-
-        synth_mp3 = OUTPUT_DIR / "dark_cinema_score.mp3"
-        logger.info("Dark Cello & Oppenheimer tarzı Gerilim Ambiyansı (Sub-Bass Drone) sentezleniyor...")
-
-        # Re Minör (D Minor) Karanlık Cello & Sub-Bass gerilim harmonikleri + Sahne başı derin nabız vuruşu
-        expr = (
-            "0.25*sin(2*PI*73.42*t*(1+0.002*sin(2*PI*0.15*t)))+"
-            "0.18*sin(2*PI*110.00*t)+"
-            "0.14*sin(2*PI*146.83*t)+"
-            "0.10*sin(2*PI*174.61*t)*(0.5+0.5*sin(2*PI*0.08*t))+"
-            "0.22*sin(2*PI*36.71*t)*exp(-mod(t,6.0)*1.8)"
-        )
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"aevalsrc='{expr}':s=44100:d={int(total_duration) + 15}",
-            "-af", "lowpass=f=650,tremolo=f=0.20:d=0.45,volume=0.24",
-            "-c:a", "libmp3lame", "-b:a", "192k",
-            str(synth_mp3)
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-        return synth_mp3
-
-    def assemble_final_video(self, total_duration: float):
-        concat_list = self.clips_dir / "concat_list.txt"
-        with open(concat_list, "w", encoding="utf-8") as f:
-            for scene in self.plan.scenes:
-                clip_path = (self.clips_dir / f"clip_{scene.scene_number}.mp4").resolve()
-                f.write(f"file '{clip_path.as_posix()}'\n")
-
-        merged_no_sub = OUTPUT_DIR / "merged_raw.mp4"
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(concat_list), "-c", "copy", str(merged_no_sub)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-
-        bg_music = self.ensure_background_music(total_duration)
-        srt_escaped = self.master_srt_path.resolve().as_posix().replace(":", r"\:")
-        sub_filter = (
-            f"subtitles='{srt_escaped}':force_style='FontName=DejaVu Sans,FontSize=15,"
-            f"PrimaryColour=&H0000E6FF,OutlineColour=&H00000000,BackColour=&H99000000,"
-            f"Bold=1,BorderStyle=4,Outline=1,Shadow=0,MarginV=30,Alignment=2'"
-        )
-
-        filter_complex = (
-            f"[1:a]aloop=loop=-1:size=2e+09,atrim=0:{total_duration:.2f},volume=0.14[bg];"
-            f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout];"
-            f"[0:v]{sub_filter}[vout]"
-        )
-
-        cmd_final = [
-            "ffmpeg", "-y",
-            "-i", str(merged_no_sub),
-            "-i", str(bg_music),
-            "-filter_complex", filter_complex,
-            "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            str(self.final_video_path)
-        ]
-        subprocess.run(cmd_final, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-        logger.info(f"=== V3.0 Sinematik Belgesel Hazır: {self.final_video_path} ===")
-
-    def run_pipeline(self) -> Path:
-        # Eski klipleri temizle
-        for old_clip in self.clips_dir.glob("*.mp4"):
-            old_clip.unlink(missing_ok=True)
-
-        durations = []
-        for scene in self.plan.scenes:
-            effects = getattr(scene, "camera_effects", None) or ["zoom_in", "pan_left_to_right", "zoom_out"]
-            dur = self.render_scene_clip(scene.scene_number, effects)
-            durations.append(dur)
-
-        self.build_master_srt(durations)
-        self.assemble_final_video(sum(durations))
-        return self.final_video_path
+    # ================================================================== #
+    def render(self) -> Path:
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            raise RenderError("ffmpeg/ffprobe bulunamadı.")
+        t0 = time.monotonic()
+        log.info("Render başlıyor: %s", self.plan.working_title)
+        narration = self.build_narration()
+        jobs = self._plan_jobs()
+        clips = self.render_clips(jobs)
+        video = self.concat_video(clips)
+        audio = self.mix_audio(narration)
+        tmp = self.final_video.with_suffix(".part.mp4")
+        _run(["ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-map", "0:v", "-map", "1:a",
+              "-c:v", "copy", "-c:a", "copy", "-t", f"{self.duration:.3f}", "-movflags", "+faststart", str(tmp)],
+             "final mux")
+        tmp.replace(self.final_video)
+        self.write_srt()
+        self.write_chapters()
+        real = probe_duration(self.final_video)
+        stills = sum(1 for j in jobs if not j.is_video)
+        meta = {"duration_s": round(real, 2), "shots": len(jobs), "video_shots": len(jobs) - stills,
+                "still_shots": stills, "music": self.music_used,
+                "render_minutes": round((time.monotonic() - t0) / 60, 1)}
+        (config.OUTPUT_DIR / "render.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                                                       encoding="utf-8")
+        log.info("Render tamam: %s (%.1f dk video, %.1f dk işlem)", self.final_video.name, real / 60,
+                 meta["render_minutes"])
+        return self.final_video
