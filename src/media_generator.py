@@ -3,9 +3,10 @@
 Her cümle için:
   * Ses   : edge-tts ile cümle başına MP3  ->  output/audio/<sentence_id>.mp3
 Her kesit (shot) için, plan.source'a göre öncelik sırası (gerçek görüntü her zaman AI'den önce):
-  * archive_photo : Wikimedia (PD/CC0, arşiv sorgusu) -> Pexels foto -> Wikimedia (stok sorgusu) -> AI
-  * stock_video   : Pexels VIDEO -> Pexels foto -> Wikimedia (stok sorgusu) -> AI
-  * ai_image      : AI (Pollinations) -> Pexels foto -> Wikimedia
+  * archive_photo : Wikimedia (PD/CC0, arşiv sorgusu) -> Pexels/Pixabay foto -> Wikimedia (stok sorgusu) -> AI
+  * stock_video   : Pexels VIDEO -> Pixabay VIDEO -> Pexels/Pixabay foto -> Wikimedia (stok sorgusu) -> AI
+  * ai_image      : AI (Pollinations) -> Pexels/Pixabay foto -> Wikimedia
+Wikimedia indirmeleri sıraya alınır (aynı anda tek, aralarında bekleme), 429'da Retry-After kadar beklenir.
 Hiçbiri bulunamazsa boş tuval yerine en yakın kesitin görüntüsü yeniden kullanılır (renderer farklı kamera
 hareketi ve farklı başlangıç noktası uygular); hiç görüntü yoksa son çare koyu tuval.
 
@@ -52,7 +53,11 @@ FETCH_WORKERS = 4
 MAX_REUSE_PER_SOURCE = 3        # eksik kesit doldururken aynı görüntü en fazla bu kadar tekrar
 AI_BUDGET_S = float(os.environ.get("AI_BUDGET_S", "1800"))          # AI görsellere toplam en fazla 30 dk
 AI_MIN_INTERVAL_S = float(os.environ.get("AI_MIN_INTERVAL_S", "3" if config.POLLINATIONS_API_KEY else "12"))
-AI_MAX_CONSEC_FAIL = 8          # arka arkaya bu kadar başarısız AI denemesi -> bu çalışmada AI kapalı
+AI_MAX_CONSEC_FAIL = 8
+WIKI_MIN_INTERVAL_S = float(os.environ.get("WIKI_MIN_INTERVAL_S", "1.5"))   # Wikimedia indirmeleri arası bekleme
+WIKI_THUMB_W = 1920             # Wikimedia standart küçük resim boyutu (standart dışı boyutlar sıkı kısıtlanır)
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "").strip()
+TTS_RATE = os.environ.get("TTS_RATE", "-8%")   # anlatıcı biraz yavaş: belgesel temposu          # arka arkaya bu kadar başarısız AI denemesi -> bu çalışmada AI kapalı
 
 _STOP = {
     "the", "and", "with", "from", "into", "onto", "over", "under", "of", "in", "on", "at", "to", "for", "by",
@@ -112,6 +117,9 @@ class MediaGenerator:
         self._ai_last = 0.0
         self._ai_auth_fail = 0
         self._ai_consec_fail = 0
+        self._wiki_lock = threading.Lock()
+        self._wiki_last = 0.0
+        self.pixabay_ok = bool(PIXABAY_API_KEY)
 
     # ================================================================== #
     # Yardımcılar
@@ -195,6 +203,17 @@ class MediaGenerator:
 
     def check_providers(self) -> None:
         """Pexels'i tek istekle sınar; anahtar reddedilirse 100'lerce boş istek atmadan kapatır."""
+        if self.pixabay_ok:
+            r = self._fetch("https://pixabay.com/api/", "pixabay", params={"key": PIXABAY_API_KEY, "q": "forest",
+                                                                           "per_page": 3})
+            if r is not None and r.status_code == 200:
+                log.info("Pixabay bağlantısı tamam.")
+            elif r is not None:
+                self.pixabay_ok = False
+                log.error("Pixabay anahtarı REDDEDİLDİ (HTTP %d: %s). PIXABAY_API_KEY secret'ını kontrol et.",
+                          r.status_code, " ".join(self._body(r)[:120].split()))
+        else:
+            log.warning("PIXABAY_API_KEY yok: Pixabay kapalı.")
         if not self.pexels_ok:
             log.warning("Pexels kapalı (%s): stok video yok, yalnızca arşiv ve AI görselleri.", self.pexels_note)
             return
@@ -238,7 +257,7 @@ class MediaGenerator:
         params = {
             "action": "query", "format": "json", "generator": "search",
             "gsrsearch": f"{query} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": 20,
-            "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata", "iiurlwidth": 2560,
+            "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata", "iiurlwidth": WIKI_THUMB_W,
         }
         r = self._get("https://commons.wikimedia.org/w/api.php", "wikimedia", self.wiki, params=params)
         out: list[dict] = []
@@ -262,13 +281,33 @@ class MediaGenerator:
             self._cache[key] = out
         return out
 
+    def _wiki_download(self, url: str) -> requests.Response | None:
+        """Wikimedia dosya sunucusu paralel indirmeyi 429 ile keser: sıralı indir, gerekirse bekle ve tekrar dene."""
+        with self._wiki_lock:
+            for attempt in range(4):
+                wait = WIKI_MIN_INTERVAL_S - (time.monotonic() - self._wiki_last)
+                if wait > 0:
+                    time.sleep(wait)
+                r = self._fetch(url, "wikimedia-dosya", self.wiki, timeout=30)
+                self._wiki_last = time.monotonic()
+                if r is None:
+                    return None
+                if r.status_code == 200:
+                    return r
+                self._fail("wikimedia-dosya", f"HTTP {r.status_code}", self._body(r))
+                if r.status_code != 429:
+                    return None
+                ra = r.headers.get("Retry-After", "")
+                time.sleep(min(float(ra) if ra.isdigit() else 5 * 2 ** attempt, 60))
+        return None
+
     def _wikimedia(self, query: str, path: Path) -> bool:
         if not query:
             return False
         for c in self._wiki_candidates(query):
             if not self._claim(c["url"]):
                 continue
-            img = self._get(c["url"], "wikimedia-dosya", self.wiki, timeout=30)
+            img = self._wiki_download(c["url"])
             if img and self._save_image(img.content, path, MIN_IMAGE_WIDTH):
                 self._credit(Credit("wikimedia", c["title"], c["page"], c["license"]))
                 self._count("archive_photo")
@@ -346,6 +385,80 @@ class MediaGenerator:
                 self._count("stock_photo")
                 return True
         return False
+
+    # ================================================================== #
+    # Pixabay: video ve foto (Pixabay Content License, ticari kullanım serbest, atıf gerekmez)
+    # ================================================================== #
+    def _pixabay_search(self, kind: str, query: str) -> list[dict]:
+        key = (f"pixabay-{kind}", query.lower())
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+        url = "https://pixabay.com/api/videos/" if kind == "video" else "https://pixabay.com/api/"
+        params = {"key": PIXABAY_API_KEY, "q": query[:100], "per_page": 20, "safesearch": "true"}
+        if kind == "photo":
+            params.update({"image_type": "photo", "orientation": "horizontal", "min_width": MIN_IMAGE_WIDTH})
+        else:
+            params.update({"video_type": "film"})
+        r = self._fetch(url, "pixabay", params=params)
+        items: list[dict] = []
+        if r is not None:
+            if r.status_code == 200:
+                try:
+                    items = r.json().get("hits", [])
+                except ValueError:
+                    items = []
+            else:
+                self._fail("pixabay", f"HTTP {r.status_code}", self._body(r))
+                if r.status_code in (400, 401, 403) and "key" in r.text.lower():
+                    self.pixabay_ok = False
+                    log.error("Pixabay anahtarı reddedildi (HTTP %d); bu çalışmada Pixabay kapalı.", r.status_code)
+                elif r.status_code == 429:
+                    time.sleep(30)
+        with self._lock:
+            self._cache[key] = items
+        return items
+
+    def _pixabay_video(self, query: str, path: Path) -> bool:
+        if not (self.pixabay_ok and query):
+            return False
+        for v in self._pixabay_search("video", query):
+            if int(v.get("duration") or 0) < STOCK_MIN_SECONDS:
+                continue
+            files = [f for f in (v.get("videos") or {}).values()
+                     if isinstance(f, dict) and f.get("url") and f.get("width")
+                     and STOCK_MIN_W <= int(f["width"]) <= STOCK_MAX_W and int(f["width"]) > int(f.get("height") or 0)]
+            if not files:
+                continue
+            best = max(files, key=lambda f: int(f["width"]))
+            if not self._claim(f"pixabay-video-{v.get('id')}"):
+                continue
+            data = self._get(best["url"], "pixabay-dosya", timeout=120)
+            if data and len(data.content) > 100_000:
+                path.write_bytes(data.content)
+                self._credit(Credit("pixabay_video", v.get("user", "Pixabay"), v.get("pageURL", ""),
+                                    "Pixabay Content License"))
+                self._count("stock_video")
+                return True
+        return False
+
+    def _pixabay_photo(self, query: str, path: Path) -> bool:
+        if not (self.pixabay_ok and query):
+            return False
+        for ph in self._pixabay_search("photo", query):
+            url = ph.get("largeImageURL")
+            if not url or not self._claim(f"pixabay-photo-{ph.get('id')}"):
+                continue
+            img = self._get(url, "pixabay-dosya", timeout=30)
+            if img and self._save_image(img.content, path, MIN_IMAGE_WIDTH):
+                self._credit(Credit("pixabay_photo", ph.get("user", "Pixabay"), ph.get("pageURL", ""),
+                                    "Pixabay Content License"))
+                self._count("stock_photo")
+                return True
+        return False
+
+    def _stock_photo(self, query: str, path: Path) -> bool:
+        return self._pexels_photo(query, path) or self._pixabay_photo(query, path)
 
     # ================================================================== #
     # Yapay zekâ görseli (sıralı, hız sınırına saygılı)
@@ -438,17 +551,18 @@ class MediaGenerator:
         ai_prompt = shot.ai_prompt_en or stock_q
         if shot.source == "archive_photo":
             chain = (lambda: self._wikimedia(archive_q, img),
-                     lambda: self._pexels_photo(stock_q, img),
+                     lambda: self._stock_photo(stock_q, img),
                      lambda: stock_q != archive_q and self._wikimedia(stock_q, img),
                      lambda: self._pollinations(ai_prompt, img, seed))
         elif shot.source == "stock_video":
             chain = (lambda: self._pexels_video(shot.stock_query_en or stock_q, vid),
-                     lambda: self._pexels_photo(stock_q, img),
+                     lambda: self._pixabay_video(shot.stock_query_en or stock_q, vid),
+                     lambda: self._stock_photo(stock_q, img),
                      lambda: self._wikimedia(stock_q, img),
                      lambda: self._pollinations(ai_prompt, img, seed))
         else:
             chain = (lambda: self._pollinations(ai_prompt, img, seed),
-                     lambda: self._pexels_photo(stock_q, img),
+                     lambda: self._stock_photo(stock_q, img),
                      lambda: self._wikimedia(stock_q, img))
         for step in chain:
             if step():
@@ -508,7 +622,7 @@ class MediaGenerator:
         if not thumb_bg.exists():
             q = keywords(self.plan.seo.thumbnail_prompt_en) or "dark mysterious archive"
             if not (self._pollinations(self.plan.seo.thumbnail_prompt_en, thumb_bg, seed0 + 999)
-                    or self._pexels_photo(q, thumb_bg) or self._wikimedia(q, thumb_bg)):
+                    or self._stock_photo(q, thumb_bg) or self._wikimedia(q, thumb_bg)):
                 stills = [p for p in (self._existing(t[0], t[1]) for t in tasks) if p is not None and p.suffix == ".jpg"]
                 if stills:
                     shutil.copyfile(stills[0], thumb_bg)
@@ -535,7 +649,7 @@ class MediaGenerator:
                 voice = voices[0] if attempt < config.TTS_RETRIES - 1 else voices[-1]
                 tmp = out.with_suffix(".part.mp3")
                 try:
-                    await edge_tts.Communicate(text, voice).save(str(tmp))
+                    await edge_tts.Communicate(text, voice, rate=TTS_RATE).save(str(tmp))
                     if tmp.exists() and tmp.stat().st_size > 2000:
                         tmp.replace(out)
                         return
@@ -551,7 +665,7 @@ class MediaGenerator:
 
     def generate_narration(self) -> None:
         n = len(self.plan.sentences())
-        log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s", n, self.lang.voices[0])
+        log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s, hız: %s", n, self.lang.voices[0], TTS_RATE)
         t0 = time.monotonic()
         asyncio.run(self._tts_all())
         log.info("Anlatım hazır (%.0f sn).", time.monotonic() - t0)
@@ -574,6 +688,7 @@ class MediaGenerator:
             "reused_or_blank_share": round(weak / total, 2),
             "provider_errors": dict(self.errors),
             "pexels": "ok" if self.pexels_ok else f"kapalı ({self.pexels_note})",
+            "pixabay": "ok" if self.pixabay_ok else "kapalı",
             "ai": "ok" if self.ai_ok else "kapalı",
             "ai_seconds": round(self.ai_spent),
         }

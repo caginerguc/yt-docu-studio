@@ -431,7 +431,7 @@ when nothing filmable or archival fits. camera: vary the movement; match the moo
 pan for reveals). Alternate source types so no more than 2 consecutive shots share a source."""
         # Sinematograf yazar değil: NIM'de çalışır, Gemini'nin günlük kotası senaryoya kalır (anahtar yoksa Gemini).
         res = self.judge.generate_json(prompt, ActShots, system=self.system, temperature=0.6, validate=validate,
-                                       max_output_tokens=6000, label=f"shots-act{act.act_id}")
+                                       max_output_tokens=16000, label=f"shots-act{act.act_id}")
         by_id = {x.sentence_id: x.shots for x in res.sentences}
         prev: list[ShotOut] = []
         for s in act.sentences:

@@ -13,8 +13,8 @@ Ortam değişkenleri (hepsi isteğe bağlı):
   NVIDIA_API_KEY   NIM anahtarı (nvapi-...)
   JUDGE_MODELS     virgülle ayrılmış model listesi, ilk model tercih edilir
   JUDGE_ENABLED    "0" ise hakem kapalı
-  JUDGE_TIMEOUT_S  tek isteğin okuma zaman aşımı (varsayılan 180)
-  JUDGE_BUDGET_S   tüm çalışma boyunca NIM'de harcanabilecek toplam süre (varsayılan 1500); dolunca Gemini'ye geçilir
+  JUDGE_TIMEOUT_S  tek isteğin okuma zaman aşımı (varsayılan 300)
+  JUDGE_BUDGET_S   tüm çalışma boyunca NIM'de harcanabilecek toplam süre (varsayılan 3600); dolunca Gemini'ye geçilir
   NIM_BASE_URL     varsayılan https://integrate.api.nvidia.com/v1
 """
 from __future__ import annotations
@@ -35,10 +35,12 @@ from src.llm import LLM
 log = logging.getLogger("makrokontext.judge")
 T = TypeVar("T", bound=BaseModel)
 
+# Sıra gerçek çalışmaya göre: nemotron yanıt veriyor (ama uzun yanıtta kesilebiliyor -> yüksek belirteç sınırı),
+# Mistral Large büyük isteklerde sık sık zaman aşımına düşüyor -> sona alındı.
 DEFAULT_JUDGE_MODELS = [
-    "mistralai/mistral-large-4-1t-a52b",
     "nvidia/nemotron-3-ultra-550b-a55b",
     "z-ai/glm-5.3-flash",
+    "mistralai/mistral-large-4-1t-a52b",
 ]
 
 _THINK = re.compile(r"<think>.*?</think>", re.S | re.I)
@@ -107,8 +109,8 @@ class JudgeLLM:
         raw = models if models is not None else [m.strip() for m in os.environ.get("JUDGE_MODELS", "").split(",")]
         self.models = list(dict.fromkeys(m for m in raw if m)) or list(DEFAULT_JUDGE_MODELS)
         self.url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/") + "/chat/completions"
-        self.timeout = float(os.environ.get("JUDGE_TIMEOUT_S", "180"))
-        self.budget_s = float(os.environ.get("JUDGE_BUDGET_S", "1500"))
+        self.timeout = float(os.environ.get("JUDGE_TIMEOUT_S", "300"))
+        self.budget_s = float(os.environ.get("JUDGE_BUDGET_S", "3600"))
         self.spent_s = 0.0
         self.session = session or requests.Session()
         self._sleep = sleep
@@ -236,7 +238,7 @@ class JudgeLLM:
                 return obj
 
             try:
-                return self._run(sys_txt, prompt, temperature, max_output_tokens or 4096, parse, label)
+                return self._run(sys_txt, prompt, temperature, max_output_tokens or 16000, parse, label)
             except _Unavailable as e:
                 log.warning("[%s] hakem NIM yolu kullanılamadı, Gemini'ye düşülüyor: %s", label, e)
         self.fallback_calls += 1
@@ -247,7 +249,7 @@ class JudgeLLM:
                       max_output_tokens: int | None = None, label: str = "text") -> str:
         if self.active:
             try:
-                return self._run(system or "", prompt, temperature, max_output_tokens or 4096,
+                return self._run(system or "", prompt, temperature, max_output_tokens or 16000,
                                  lambda t: _THINK.sub("", t).strip(), label)
             except _Unavailable as e:
                 log.warning("[%s] hakem NIM yolu kullanılamadı, Gemini'ye düşülüyor: %s", label, e)
