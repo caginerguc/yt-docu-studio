@@ -105,5 +105,14 @@
     "date": "2026-11-22T14:53:41+01:00",
     "language": "de",
     "status": "produced"
+  },
+  {
+    "topic_id": "flick-affaere-parteispenden-skandal",
+    "headline": "Der gekaufte Staat: Die Machtakten der Flick-Affäre",
+    "wiki_main": "Flick-Affäre",
+    "collection": "dunkle_korridore",
+    "date": "2026-11-23T09:29:23+01:00",
+    "language": "de",
+    "status": "produced"
   }
 ]
