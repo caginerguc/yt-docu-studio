@@ -144,7 +144,9 @@ def main() -> int:
             privacy = args.privacy
             if privacy == "public":
                 reasons = quality_gate(plan, media_report)
-                if reasons:
+                if reasons and not config.QUALITY_GATE:
+                    log.warning("Kalite uyarısı (kapı kapalı, yine de public yükleniyor): %s", "; ".join(reasons))
+                elif reasons:
                     privacy = "private"
                     log.warning("Kalite kapısı: video PRIVATE yükleniyor, elle inceleyip yayına alın. Nedenler: %s",
                                 "; ".join(reasons))

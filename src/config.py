@@ -309,7 +309,9 @@ CHANNEL_WATERMARK = "MAKROKONTEXT"
 UPLOAD_ENABLED = _env_bool("UPLOAD_ENABLED", True)
 # DİKKAT: API denetiminden (audit) geçmemiş projelerde YouTube her videoyu private'a kilitler.
 UPLOAD_PRIVACY = _env("UPLOAD_PRIVACY", "public").lower()   # varsayılan: doğrudan yayında
-# Kalite kapısı: public istenip video bu eşikleri geçemezse private yüklenir (elle inceleme için)
+# Kalite kapısı (varsayılan KAPALI: her video doğrudan public). QUALITY_GATE=true yapılırsa public istenip
+# video bu eşikleri geçemediğinde private yüklenir (elle inceleme için).
+QUALITY_GATE = _env_bool("QUALITY_GATE", False)
 PUBLIC_MIN_SCORE = int(_env("PUBLIC_MIN_SCORE", "5"))            # eleştirmen genel puanı (0-10)
 PUBLIC_MAX_WEAK_VISUALS = float(_env("PUBLIC_MAX_WEAK_VISUALS", "0.25"))  # tekrar/boş kesit payı üst sınırı
 YT_CATEGORY_ID = _env("YT_CATEGORY_ID", "27")            # 27 = Education
