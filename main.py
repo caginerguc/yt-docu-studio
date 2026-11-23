@@ -42,6 +42,21 @@ def music_credits(paths: list[Path], lang: str) -> str:
     return f"{_MUSIC_LABEL.get(lang, 'Music')}:\n" + "\n".join(lines) if lines else ""
 
 
+def quality_gate(plan, media_report: dict) -> list[str]:
+    """Herkese açık yayını engelleyen nedenler (boşsa video yayına hazır)."""
+    reasons = []
+    overall = plan.critique.get("overall")
+    if isinstance(overall, (int, float)) and overall < config.PUBLIC_MIN_SCORE:
+        reasons.append(f"eleştirmen puanı {overall} < {config.PUBLIC_MIN_SCORE}")
+    fc = plan.critique.get("factcheck") or {}
+    if fc.get("llm_check") not in (None, "ok"):
+        reasons.append(f"LLM olgu denetimi çalışmadı ({fc.get('llm_check')})")
+    weak = media_report.get("reused_or_blank_share", 0)
+    if weak > config.PUBLIC_MAX_WEAK_VISUALS:
+        reasons.append(f"tekrar/boş kesit payı %{round(weak * 100)} > %{round(config.PUBLIC_MAX_WEAK_VISUALS * 100)}")
+    return reasons
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="MakroKontext otonom belgesel stüdyosu")
     ap.add_argument("--lang", default=config.DEFAULT_LANG, type=str.lower, choices=sorted(config.LANGS))
@@ -92,7 +107,9 @@ def main() -> int:
 
         # 3) Medya
         from src.media_generator import MediaGenerator
-        MediaGenerator(plan).run()
+        media = MediaGenerator(plan)
+        media.run()
+        media_report = media.report()
 
         # 4) Kapak
         from src.thumbnail import build_thumbnails
@@ -124,12 +141,19 @@ def main() -> int:
             log.info("Yükleme kapalı (dry-run). Video: %s", video)
         else:
             from src.youtube_uploader import VideoMeta, YouTubeUploader
+            privacy = args.privacy
+            if privacy == "public":
+                reasons = quality_gate(plan, media_report)
+                if reasons:
+                    privacy = "private"
+                    log.warning("Kalite kapısı: video PRIVATE yükleniyor, elle inceleyip yayına alın. Nedenler: %s",
+                                "; ".join(reasons))
             up = YouTubeUploader()
             vid = up.upload_video(video, VideoMeta(plan.seo.title, description, plan.seo.tags,
-                                                   plan.language, args.privacy))
+                                                   plan.language, privacy))
             up.set_thumbnail(vid, thumb)
             up.add_captions(vid, renderer.srt_path, plan.language)
-            actual_privacy = getattr(up, "last_privacy", args.privacy)
+            actual_privacy = getattr(up, "last_privacy", privacy)
             history.set_status(plan.topic_id, "uploaded", video_id=vid, url=f"https://youtu.be/{vid}",
                                privacy=actual_privacy)
             meta["video_id"] = vid

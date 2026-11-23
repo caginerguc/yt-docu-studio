@@ -105,6 +105,44 @@ def _fmt_srt(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+# Altyazı satırı bu sözcüklerle bitmemeli (artikel/edat/bağlaç sonraki sözcüğe aittir)
+_SUB_WEAK_END = frozenset("""der die das den dem des ein eine einer eines einem einen und oder als an am auf aus bei bis
+für im in mit nach von vom vor zu zum zur über unter durch gegen ohne um wie dass ob sowie sich seit
+the a an of to in on at for with and or from by as that into ve ile bir bu için gibi""".split())
+
+
+def _break_score(words: list[str], i: int) -> float:
+    """words[i] öncesinde bölmenin puanı: noktalama sonrası iyi; artikel/edat sonrası veya ad içinde kötü."""
+    prev, nxt = words[i - 1], words[i]
+    score = 0.0
+    if prev[-1] in ",;:–—)":
+        score += 3
+    if prev.lower().strip(",;:") in _SUB_WEAK_END:
+        score -= 3
+    if i - 1 > 0 and prev[:1].isupper() and nxt[:1].isupper():     # olası özel ad: 'Franz | Josef Strauß'
+        score -= 1.5
+    if nxt[:1].isdigit() or prev[:1].isdigit():                    # '25 | Millionen', '1984 | ebenfalls' değil
+        score -= 1
+    return score
+
+
+def split_words(words: list[str], parts: int, slack: int = 2) -> list[list[str]]:
+    """Sözcükleri dengeli parçalara böler; ideal kırılımın ±slack çevresinde en doğal noktayı seçer."""
+    n = len(words)
+    if parts <= 1 or n < 2:
+        return [words]
+    cuts, start = [], 0
+    for k in range(1, parts):
+        ideal = round(n * k / parts)
+        lo, hi = max(start + 1, ideal - slack), min(n - (parts - k), ideal + slack)
+        best = max(range(lo, hi + 1), key=lambda i: _break_score(words, i) - 0.6 * abs(i - ideal)) \
+            if lo <= hi else min(max(ideal, start + 1), n - 1)
+        cuts.append(best)
+        start = best
+    bounds = [0, *cuts, n]
+    return [words[a:b] for a, b in zip(bounds, bounds[1:]) if b > a]
+
+
 def _fmt_chapter(t: float) -> str:
     t = int(t)
     h, rem = divmod(t, 3600)
@@ -396,8 +434,7 @@ class VideoRenderer:
                 continue
             # Dengeli bölme: 13 kelime -> 7+6 (12+1 gibi tek kelimelik kuyruk oluşmaz)
             parts = -(-len(words) // SUB_MAX_WORDS)
-            size = -(-len(words) // parts)
-            chunks = [words[i:i + size] for i in range(0, len(words), size)]
+            chunks = split_words(words, parts)
             total_chars = sum(len(" ".join(c)) for c in chunks) or 1
             t = tm.speech_start
             span = max(0.5, tm.end - tm.speech_start)
@@ -405,9 +442,9 @@ class VideoRenderer:
                 txt = " ".join(c)
                 d = span * len(txt) / total_chars
                 n += 1
-                if len(txt) > 42:                                  # iki satıra böl
-                    mid = len(c) // 2
-                    txt = " ".join(c[:mid]) + "\n" + " ".join(c[mid:])
+                if len(txt) > 42 and len(c) > 1:                   # iki satıra böl
+                    top, bottom = split_words(c, 2)
+                    txt = " ".join(top) + "\n" + " ".join(bottom)
                 blocks.append(f"{n}\n{_fmt_srt(t)} --> {_fmt_srt(t + d - 0.05)}\n{txt}\n")
                 t += d
         self.srt_path.write_text("\n".join(blocks), encoding="utf-8")
