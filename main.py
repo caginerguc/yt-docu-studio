@@ -8,7 +8,7 @@
   6 YouTube yükleme (video + kapak + altyazı) ve konu hafızası
 
 Örnekler:
-  python main.py --lang de                       # tam çalıştırma, gizlilik UPLOAD_PRIVACY (varsayılan private)
+  python main.py --lang de                       # tam çalıştırma, gizlilik UPLOAD_PRIVACY (varsayılan public)
   python main.py --lang de --privacy unlisted
   python main.py --dry-run                       # her şeyi üret, YouTube'a yükleme
   python main.py --plan output/plan.json         # araştırma+senaryoyu atla, var olan planla devam et
@@ -129,9 +129,11 @@ def main() -> int:
                                                    plan.language, args.privacy))
             up.set_thumbnail(vid, thumb)
             up.add_captions(vid, renderer.srt_path, plan.language)
+            actual_privacy = getattr(up, "last_privacy", args.privacy)
             history.set_status(plan.topic_id, "uploaded", video_id=vid, url=f"https://youtu.be/{vid}",
-                               privacy=args.privacy)
+                               privacy=actual_privacy)
             meta["video_id"] = vid
+            meta["privacy"] = actual_privacy
             config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         log.info("=== Tamamlandı: %.1f dk ===", (time.monotonic() - t0) / 60)

@@ -138,7 +138,13 @@ class YouTubeUploader:
         if "id" not in response:
             raise UploadError(f"Beklenmeyen yanıt: {response}")
         vid = response["id"]
-        log.info("Yüklendi: https://youtu.be/%s", vid)
+        actual = (response.get("status") or {}).get("privacyStatus", meta.privacy)
+        log.info("Yüklendi: https://youtu.be/%s (gizlilik: %s)", vid, actual)
+        if actual != meta.privacy:
+            log.warning("İstenen gizlilik '%s' ama YouTube '%s' olarak ayarladı. "
+                        "API projesi denetimden (audit) geçmemişse videolar private'a kilitlenir.",
+                        meta.privacy, actual)
+        self.last_privacy = actual
         return vid
 
     def set_thumbnail(self, video_id: str, thumb: Path | None) -> bool:

@@ -308,7 +308,7 @@ CHANNEL_WATERMARK = "MAKROKONTEXT"
 # --------------------------------------------------------------------------- #
 UPLOAD_ENABLED = _env_bool("UPLOAD_ENABLED", True)
 # DİKKAT: API denetiminden (audit) geçmemiş projelerde YouTube her videoyu private'a kilitler.
-UPLOAD_PRIVACY = _env("UPLOAD_PRIVACY", "private").lower()
+UPLOAD_PRIVACY = _env("UPLOAD_PRIVACY", "public").lower()   # varsayılan: doğrudan yayında
 YT_CATEGORY_ID = _env("YT_CATEGORY_ID", "27")            # 27 = Education
 YT_MADE_FOR_KIDS = False
 YT_CONTAINS_SYNTHETIC_MEDIA = True                       # sentetik medya beyanı (zorunlu)
