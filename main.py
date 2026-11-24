@@ -96,11 +96,14 @@ def main() -> int:
             from src.agent_researcher import ResearchAgent
             from src.agents_editorial import EditorialCrew
             from src.llm import LLM
+            from src.llm_judge import JudgeLLM
 
             log.info("=== MakroKontext başladı (dil: %s, gizlilik: %s) ===", args.lang, args.privacy)
             llm = LLM()
+            judge = JudgeLLM(llm)
+            llm.secondary = judge        # Gemini kesintisinde (503/kota) tüm metin işleri NVIDIA NIM'e düşer
             dossier = ResearchAgent(llm, args.lang).run()
-            plan = EditorialCrew(llm, args.lang).produce(dossier)
+            plan = EditorialCrew(llm, args.lang, judge=judge).produce(dossier)
             plan.save()
             log.info("Plan: '%s' — %d kelime, ~%.1f dk, %d kesit", plan.seo.title, plan.word_count,
                      plan.est_minutes, plan.shot_count())

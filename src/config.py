@@ -106,6 +106,10 @@ TEXT_FALLBACK_MODELS = _env_list(
 LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 5)
 LLM_BACKOFF_BASE_S = _env_int("LLM_BACKOFF_BASE_S", 6)   # 6, 12, 24, 48 ...
 LLM_BACKOFF_MAX_S = 60
+# 503 "high demand": aynı modelde bu kadar denemeden sonra sıradaki modele geç (5 deneme ~3 dk bekletiyordu)
+LLM_OVERLOAD_RETRIES = _env_int("LLM_OVERLOAD_RETRIES", 3)
+# Gemini tamamen yanıt vermezse bu süre boyunca çağrılar doğrudan yedek sağlayıcıya (NVIDIA NIM) gider
+LLM_PRIMARY_COOLDOWN_S = _env_int("LLM_PRIMARY_COOLDOWN_S", 600)
 
 
 # --------------------------------------------------------------------------- #

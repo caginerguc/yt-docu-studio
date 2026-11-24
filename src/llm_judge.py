@@ -30,7 +30,7 @@ from typing import Any, Callable, TypeVar
 import requests
 from pydantic import BaseModel
 
-from src.llm import LLM
+from src.llm import LLM, LLMError
 
 log = logging.getLogger("makrokontext.judge")
 T = TypeVar("T", bound=BaseModel)
@@ -225,7 +225,7 @@ class JudgeLLM:
     # ------------------------------------------------------------------ #
     def generate_json(self, prompt: str, schema: type[T], *, system: str | None = None,
                       temperature: float = 0.3, validate: Callable[[T], None] | None = None,
-                      max_output_tokens: int | None = None, label: str = "json") -> T:
+                      max_output_tokens: int | None = None, label: str = "json", allow_fallback: bool = True) -> T:
         if self.active:
             sys_txt = (system + "\n\n" if system else "") + (
                 "OUTPUT FORMAT: reply with ONE JSON object and nothing else (no markdown, no commentary). "
@@ -240,19 +240,28 @@ class JudgeLLM:
             try:
                 return self._run(sys_txt, prompt, temperature, max_output_tokens or 16000, parse, label)
             except _Unavailable as e:
+                if not allow_fallback:
+                    raise LLMError(f"[{label}] NIM kullanılamadı: {e}") from e
                 log.warning("[%s] hakem NIM yolu kullanılamadı, Gemini'ye düşülüyor: %s", label, e)
+        if not allow_fallback:
+            raise LLMError(f"[{label}] NIM kapalı (NVIDIA_API_KEY yok veya JUDGE_ENABLED=0)")
         self.fallback_calls += 1
         return self.fallback.generate_json(prompt, schema, system=system, temperature=temperature,
-                                           validate=validate, max_output_tokens=max_output_tokens, label=label)
+                                           validate=validate, max_output_tokens=max_output_tokens, label=label,
+                                           use_secondary=False)
 
     def generate_text(self, prompt: str, *, system: str | None = None, temperature: float = 0.3,
-                      max_output_tokens: int | None = None, label: str = "text") -> str:
+                      max_output_tokens: int | None = None, label: str = "text", allow_fallback: bool = True) -> str:
         if self.active:
             try:
                 return self._run(system or "", prompt, temperature, max_output_tokens or 16000,
                                  lambda t: _THINK.sub("", t).strip(), label)
             except _Unavailable as e:
+                if not allow_fallback:
+                    raise LLMError(f"[{label}] NIM kullanılamadı: {e}") from e
                 log.warning("[%s] hakem NIM yolu kullanılamadı, Gemini'ye düşülüyor: %s", label, e)
+        if not allow_fallback:
+            raise LLMError(f"[{label}] NIM kapalı (NVIDIA_API_KEY yok veya JUDGE_ENABLED=0)")
         self.fallback_calls += 1
         return self.fallback.generate_text(prompt, system=system, temperature=temperature,
-                                           max_output_tokens=max_output_tokens, label=label)
+                                           max_output_tokens=max_output_tokens, label=label, use_secondary=False)

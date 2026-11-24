@@ -241,6 +241,8 @@ class EditorialCrew:
         self.llm = llm or LLM()
         # Eleştirmen ve doğrulayıcı yazardan farklı model ailesiyle çalışır (anahtar yoksa Gemini'ye düşer).
         self.judge = judge or JudgeLLM(self.llm)
+        if getattr(self.llm, "secondary", True) is None:     # Gemini kesintisinde yazım NIM'e düşer
+            self.llm.secondary = self.judge
         self.lang = config.get_lang(lang_code)
         self.system = ("You are the writing room of MakroKontext, a documentary channel in the tradition of Arte, "
                        f"Lemmino and Fern. Output language: {self.lang.name}. Accuracy beats drama.")
@@ -730,8 +732,9 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
                       "source_mix": mix},
         )
         plan.recompute()
-        log.info("Model çağrıları: Gemini %d | NIM %d (son model: %s) | NIM->Gemini düşüş %d",
-                 getattr(self.llm, "calls", 0), self.judge.calls, self.judge.last_model or "-", self.judge.fallback_calls)
+        log.info("Model çağrıları: Gemini %d | NIM %d (son model: %s) | NIM->Gemini düşüş %d | Gemini->NIM düşüş %d",
+                 getattr(self.llm, "calls", 0), self.judge.calls, self.judge.last_model or "-", self.judge.fallback_calls,
+                 getattr(self.llm, "secondary_calls", 0))
         log.info("Plan hazır: %d kelime, ~%.1f dk, %d kesit, %d cümle", plan.word_count, plan.est_minutes,
                  plan.shot_count(), len(plan.sentences()))
         return plan
