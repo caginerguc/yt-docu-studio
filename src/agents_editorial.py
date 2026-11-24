@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import logging
 import os
+import re
 import zlib
 from typing import Literal
 
@@ -104,6 +106,15 @@ class FactCheckResult(BaseModel):
     flags: list[FactFlag]
 
 
+class Correction(BaseModel):
+    sentence_id: str
+    corrected_text: str
+
+
+class ProofreadResult(BaseModel):
+    corrections: list[Correction]
+
+
 class ShotOut(BaseModel):
     source: Literal["stock_video", "archive_photo", "ai_image"]
     stock_query_en: str
@@ -165,6 +176,42 @@ def clean_sentence(text: str) -> str:
     return t if t and t[-1] in ".!?…" else t + "."
 
 
+# Tekrar denetimi: aynı olguyu ikinci kez anlatan cümleler (perdeler arası yeniden yazımda sık olur)
+_DUP_STOP = frozenset("""der die das den dem des ein eine einer eines einem einen und oder aber doch als auch auf aus
+bei mit nach von vom zum zur für über unter durch sich nicht nur noch schon dann wird wurde wurden sind ist war waren
+hat hatte haben diese dieser dieses diesem diesen sein seine seiner ihre ihrer the and of to in on for with from that
+this was were are is has had have bir ve ile bu bunu için olarak gibi daha çok""".split())
+DUP_OVERLAP = 0.6          # küçük cümlenin içerik köklerinin en az %60'ı öncekiyle aynıysa tekrar sayılır
+_NUM_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _content_stems(text: str) -> set[str]:
+    out: set[str] = set()
+    for w in re.findall(r"[^\W_][\w-]*", text.lower()):
+        if w in _DUP_STOP or (len(w) < 4 and not w.isdigit()):
+            continue
+        out.add(w[:7])     # kaba kök: zahlte/zahlt, prägte/prägt aynı sayılır
+    return out
+
+
+def drop_repeated_sentences(acts: list[PlanAct]) -> list[str]:
+    """Filmde ikinci kez anlatılan cümleleri siler (ilk geçen kalır). Perde başına en az 3 cümle korunur."""
+    seen: list[set[str]] = []
+    removed: list[str] = []
+    for a in acts:
+        for s in list(a.sentences):
+            st = _content_stems(s.text)
+            dup = len(st) >= 4 and any(len(st & p) / min(len(st), len(p)) >= DUP_OVERLAP
+                                       for p in seen if len(p) >= 4)
+            if dup and len(a.sentences) > 3:
+                a.sentences.remove(s)
+                removed.append(s.id)
+            else:
+                seen.append(st)
+    renumber(acts)
+    return removed
+
+
 def shots_for(sentence: PlanSentence) -> int:
     secs = sentence.words * 60 / config.WORDS_PER_MINUTE
     return max(1, min(4, round(secs / config.SHOT_TARGET_S)))
@@ -173,8 +220,10 @@ def shots_for(sentence: PlanSentence) -> int:
 NARRATION_RULES = f"""NARRATION RULES
 - Spoken documentary voice: calm, precise, quietly gripping. Short, strong sentences (8-25 words, never more than
   {config.MAX_SENTENCE_WORDS}). Occasionally one very short sentence after a long one.
-- Written for text-to-speech: no abbreviations (write words out), no parentheses, no markdown, no stage directions,
-  no emojis, no lists.
+- Written for text-to-speech: no abbreviations, no parentheses, no markdown, no stage directions,
+  no emojis, no lists. Write years, dates and amounts with digits (1981, 25 Millionen), never spelled out in words.
+- Every fact is told ONCE in the whole film. Never restate a fact that an earlier act already told; if needed,
+  refer back to it in a few words and move on.
 - Every factual statement must come from the FACTS list. Never invent documents, quotes, dates, names or numbers.
 - Label every sentence with evidence: belegt (documented fact), behauptet (a claim; attribute it explicitly to a
   person or source inside the sentence), spekulativ (open question or hypothesis; say clearly it is unresolved),
@@ -192,6 +241,8 @@ class EditorialCrew:
         self.llm = llm or LLM()
         # Eleştirmen ve doğrulayıcı yazardan farklı model ailesiyle çalışır (anahtar yoksa Gemini'ye düşer).
         self.judge = judge or JudgeLLM(self.llm)
+        if getattr(self.llm, "secondary", True) is None:     # Gemini kesintisinde yazım NIM'e düşer
+            self.llm.secondary = self.judge
         self.lang = config.get_lang(lang_code)
         self.system = ("You are the writing room of MakroKontext, a documentary channel in the tradition of Arte, "
                        f"Lemmino and Fern. Output language: {self.lang.name}. Accuracy beats drama.")
@@ -396,6 +447,44 @@ Return an empty flags list if everything is supported."""
         log.info("Doğrulama: %s", stats)
         return stats
 
+    # -- 4b. lektorat ----------------------------------------------------------- #
+    def proofread(self, acts: list[PlanAct], d: Dossier) -> int:
+        """Yalnızca yazım/dilbilgisi düzeltir. Anlamı değiştiren veya sayı kaybettiren öneriler reddedilir."""
+        by_id = {s.id: s for a in acts for s in a.sentences}
+        corpus_nums = numbers_in(d.corpus(), min_digits=1)
+        prompt = f"""You are the copy editor of a documentary voice-over in {self.lang.name}.
+Fix ONLY spelling, grammar, inflection and punctuation errors (wrong verb forms, missing genitive endings, wrong
+case endings, typos). Also rewrite years and amounts that are spelled out in words as digits (e.g. 2008).
+Do NOT change wording, style, facts, names or meaning. Return only the sentences you changed, each with its id
+and the full corrected sentence. Return an empty list if nothing needs fixing.
+
+SCRIPT:
+{script_view(acts)}"""
+        try:
+            res = self.llm.generate_json(prompt, ProofreadResult, system=self.system, temperature=0.0,
+                                         label="proofread")
+        except LLMError as e:
+            log.warning("Lektorat çalışmadı, metin olduğu gibi kullanılıyor: %s", e)
+            return 0
+        fixed = 0
+        for c in res.corrections:
+            s = by_id.get(c.sentence_id)
+            if s is None or not c.corrected_text.strip():
+                continue
+            new = clean_sentence(c.corrected_text)
+            if new == s.text:
+                continue
+            ratio = difflib.SequenceMatcher(None, s.text, new).ratio()
+            lost_nums = set(_NUM_TOKEN.findall(s.text)) - set(_NUM_TOKEN.findall(new))
+            if (ratio < 0.8 or lost_nums or numbers_missing(new, corpus_nums)
+                    or len(new.split()) > config.MAX_SENTENCE_WORDS):
+                log.info("Lektorat önerisi reddedildi (%s, benzerlik %.2f): %s", s.id, ratio, new)
+                continue
+            log.info("Lektorat %s: %s -> %s", s.id, s.text, new)
+            s.text = new
+            fixed += 1
+        return fixed
+
     # -- 5. sinematograf ------------------------------------------------------ #
     def direct_act(self, act: PlanAct, d: Dossier) -> None:
         want = {s.id: shots_for(s) for s in act.sentences}
@@ -421,6 +510,9 @@ For each sentence return EXACTLY the number of shots it needs. Each shot has a s
   Never ask for named people, brands, or specific historic events.
 - archive_photo (~{int(mix['archive_photo'] * 100)}%): ONLY when the sentence names a real person, object, building, document or place that
   likely has a public-domain historical photo. archive_query_en = the precise subject (e.g. 'Nikola Tesla portrait').
+  Its stock_query_en must NOT describe a person (no 'portrait', 'politician', 'businessman', 'man'): describe a
+  fitting object or place instead (e.g. 'old ledger desk', 'government building night'). A random stock face shown
+  while a named person is mentioned misleads viewers.
 - ai_image (~{int(mix['ai_image'] * 100)}%): atmospheric reconstruction. ai_prompt_en = one vivid scene description (composition, light,
   subject). Rules: never show a real, named person's face (use silhouettes, hands, back views, objects,
   architecture, landscapes); no readable text, no logos; do NOT add style words (a house style is appended later).
@@ -613,6 +705,11 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
             acts, scores = best[1], best[2]
 
         stats = self.fact_check(acts, d)
+        repeats = drop_repeated_sentences(acts)
+        if repeats:
+            log.info("Tekrar eden %d cümle çıkarıldı: %s", len(repeats), repeats)
+        fixed = self.proofread(acts, d)
+        log.info("Lektorat: %d cümle düzeltildi.", fixed)
         for a in acts:
             self.direct_act(a, d)
         mix = self.finalize_shots(acts)
@@ -631,11 +728,13 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
                         hashtags=seo.hashtags[:3], thumbnail_text=seo.thumbnail_text,
                         thumbnail_tag=seo.thumbnail_tag, thumbnail_prompt_en=seo.thumbnail_prompt_en,
                         music_mood=seo.music_mood, shorts_hook=seo.shorts_hook),
-            critique={**scores, "factcheck": stats, "source_mix": mix},
+            critique={**scores, "factcheck": stats, "repeats_removed": len(repeats), "proofread_fixed": fixed,
+                      "source_mix": mix},
         )
         plan.recompute()
-        log.info("Model çağrıları: Gemini %d | NIM %d (son model: %s) | NIM->Gemini düşüş %d",
-                 getattr(self.llm, "calls", 0), self.judge.calls, self.judge.last_model or "-", self.judge.fallback_calls)
+        log.info("Model çağrıları: Gemini %d | NIM %d (son model: %s) | NIM->Gemini düşüş %d | Gemini->NIM düşüş %d",
+                 getattr(self.llm, "calls", 0), self.judge.calls, self.judge.last_model or "-", self.judge.fallback_calls,
+                 getattr(self.llm, "secondary_calls", 0))
         log.info("Plan hazır: %d kelime, ~%.1f dk, %d kesit, %d cümle", plan.word_count, plan.est_minutes,
                  plan.shot_count(), len(plan.sentences()))
         return plan

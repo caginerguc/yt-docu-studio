@@ -5,6 +5,8 @@ Davranış özeti
   * 404 / "model yok" / günlük kota bitti -> modeli çalışma boyunca devre dışı bırak, zinciri kır(ma).
   * Şema veya doğrulama hatası -> hatayı modele geri bildirerek yeniden iste (aynı model).
   * Kimlik doğrulama gibi kalıcı hatalar -> döngüye girmeden hemen yükselt.
+  * Tüm Gemini modelleri başarısızsa ve `secondary` (NVIDIA NIM) tanımlıysa istek oraya gider; ardından
+    LLM_PRIMARY_COOLDOWN_S boyunca çağrılar doğrudan NIM'e yönlenir (Gemini kesintisinde dakikalarca beklenmez).
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ _RETRY_PAT = re.compile(
     r"unavailable|overloaded|high demand|resource_exhausted|deadline|timed? ?out|temporarily|internal|disconnected|connection|protocol|reset|eof",
     re.I,
 )
+_OVERLOAD_PAT = re.compile(r"high demand|overloaded|503|unavailable", re.I)
 _DAILY_PAT = re.compile(r"per ?day|daily|requests_per_day", re.I)
 _RETRY_CODES = {408, 429, 500, 502, 503, 504}
 
@@ -107,6 +110,10 @@ class LLM:
         self._sleep = sleep
         self._last_call = 0.0
         self.calls = 0
+        # Yedek sağlayıcı: generate_json/generate_text(..., allow_fallback=False) sunan nesne (JudgeLLM)
+        self.secondary: Any = None
+        self.secondary_calls = 0
+        self._primary_down_until = 0.0
 
     # ------------------------------------------------------------------ #
     def _throttle(self) -> None:
@@ -149,6 +156,10 @@ class LLM:
                         log.warning("[%s] %s devre dışı bırakıldı: %s", label, model, str(e)[:160])
                         break
                     if kind == "retry":
+                        if _OVERLOAD_PAT.search(str(e)) and attempt >= config.LLM_OVERLOAD_RETRIES:
+                            log.warning("[%s] %s aşırı yoğun (%d deneme), sıradaki modele geçiliyor.",
+                                        label, model, attempt)
+                            break
                         wait = self._backoff(attempt)
                         log.warning("[%s] %s geçici hata (deneme %d/%d), %.0fs bekleniyor: %s",
                                     label, model, attempt, config.LLM_MAX_RETRIES, wait, str(e)[:120])
@@ -171,18 +182,45 @@ class LLM:
         raise LLMError(f"[{label}] tüm modeller/denemeler başarısız. Son hata: {last_err}")
 
     # ------------------------------------------------------------------ #
+    def _dispatch(self, label: str, primary: Callable[[], Any], secondary: Callable[[Any], Any],
+                  use_secondary: bool) -> Any:
+        sec = self.secondary if use_secondary else None
+        if sec is not None and time.monotonic() < self._primary_down_until:
+            log.info("[%s] Gemini az önce yanıt vermedi; doğrudan yedek sağlayıcı (NVIDIA NIM) kullanılıyor.", label)
+            try:
+                self.secondary_calls += 1
+                return secondary(sec)
+            except LLMError as e:
+                log.warning("[%s] yedek sağlayıcı başarısız, Gemini yeniden deneniyor: %s", label, str(e)[:200])
+        try:
+            return primary()
+        except LLMError as e:
+            if sec is None:
+                raise
+            self._primary_down_until = time.monotonic() + config.LLM_PRIMARY_COOLDOWN_S
+            log.warning("[%s] Gemini kullanılamadı, yedek sağlayıcıya (NVIDIA NIM) geçiliyor: %s", label, str(e)[:200])
+            self.secondary_calls += 1
+            try:
+                return secondary(sec)
+            except LLMError as e2:
+                raise LLMError(f"[{label}] Gemini ve yedek sağlayıcı başarısız. Gemini: {e} | NIM: {e2}") from e2
+
     def generate_text(self, prompt: str, *, system: str | None = None, temperature: float = 0.7,
-                      max_output_tokens: int | None = None, label: str = "text") -> str:
+                      max_output_tokens: int | None = None, label: str = "text", use_secondary: bool = True) -> str:
         kw: dict[str, Any] = {"temperature": temperature}
         if system:
             kw["system_instruction"] = system
         if max_output_tokens:
             kw["max_output_tokens"] = max_output_tokens
-        return self._run(prompt, kw, lambda t: t, label)
+        return self._dispatch(
+            label, lambda: self._run(prompt, kw, lambda t: t, label),
+            lambda sec: sec.generate_text(prompt, system=system, temperature=temperature,
+                                          max_output_tokens=max_output_tokens, label=label, allow_fallback=False),
+            use_secondary)
 
     def generate_json(self, prompt: str, schema: type[T], *, system: str | None = None,
                       temperature: float = 0.5, validate: Callable[[T], None] | None = None,
-                      max_output_tokens: int | None = None, label: str = "json") -> T:
+                      max_output_tokens: int | None = None, label: str = "json", use_secondary: bool = True) -> T:
         kw: dict[str, Any] = {
             "temperature": temperature,
             "response_mime_type": "application/json",
@@ -199,5 +237,9 @@ class LLM:
                 validate(obj)  # ValueError fırlatırsa modele geri bildirim gider
             return obj
 
-        return self._run(prompt, kw, parse, label)
+        return self._dispatch(
+            label, lambda: self._run(prompt, kw, parse, label),
+            lambda sec: sec.generate_json(prompt, schema, system=system, temperature=temperature, validate=validate,
+                                          max_output_tokens=max_output_tokens, label=label, allow_fallback=False),
+            use_secondary)
 

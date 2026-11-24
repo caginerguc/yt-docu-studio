@@ -27,6 +27,7 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -52,7 +53,8 @@ TTS_CONCURRENCY = 4
 FETCH_WORKERS = 4
 MAX_REUSE_PER_SOURCE = 3        # eksik kesit doldururken aynı görüntü en fazla bu kadar tekrar
 AI_BUDGET_S = float(os.environ.get("AI_BUDGET_S", "1800"))          # AI görsellere toplam en fazla 30 dk
-AI_MIN_INTERVAL_S = float(os.environ.get("AI_MIN_INTERVAL_S", "3" if config.POLLINATIONS_API_KEY else "12"))
+# Anahtarsız Pollinations: IP başına 45 sn'de 1 görsel (daha sık istek HTTP 402 FREE_LIMIT döndürür)
+AI_MIN_INTERVAL_S = float(os.environ.get("AI_MIN_INTERVAL_S", "3" if config.POLLINATIONS_API_KEY else "46"))
 AI_MAX_CONSEC_FAIL = 8
 WIKI_MIN_INTERVAL_S = float(os.environ.get("WIKI_MIN_INTERVAL_S", "1.5"))   # Wikimedia indirmeleri arası bekleme
 WIKI_THUMB_W = 1920             # Wikimedia standart küçük resim boyutu (standart dışı boyutlar sıkı kısıtlanır)
@@ -78,6 +80,63 @@ def keywords(text: str, n: int = 4) -> str:
         if len(out) == n:
             break
     return " ".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# Görsel uygunluk denetimi
+# --------------------------------------------------------------------------- #
+# Arşiv araması: başlıkta sayılmayan genel sözcükler
+_GENERIC = _STOP | {"portrait", "photograph", "picture", "exterior", "interior", "up", "a", "s", "file",
+                    "jpg", "jpeg", "png", "tif", "tiff", "webp"}
+# Stok görselde tanınmış bir kişiyi gösteren etiketler: anlatılan kişi yerine başkasının yüzü görünür
+_IDENTITY_TAGS = {
+    "president", "presidential", "dictator", "pope", "celebrity", "obama", "trump", "biden", "clinton", "bush",
+    "putin", "merkel", "scholz", "kohl", "macron", "erdogan", "ataturk", "hitler", "stalin", "lenin", "mao",
+    "kennedy", "lincoln", "churchill", "gandhi", "mandela", "zelensky", "napoleon", "einstein",
+}
+# Arşiv kesitinin yedek stok sorgusu kişi tarif ediyorsa rastgele bir yüz gelir
+_PERSON_WORDS = {
+    "portrait", "politician", "businessman", "businesswoman", "man", "woman", "men", "women", "person", "people",
+    "face", "leader", "president", "minister", "chancellor", "spy", "chief", "officer", "soldier", "commander",
+    "manager", "executive", "industrialist", "accountant", "official", "banker", "lawyer", "judge", "general",
+}
+NEUTRAL_ARCHIVE_STOCK = "old archive documents"
+NEUTRAL_PERSON_AI = ("anonymous silhouette of a person standing by a window in a dim room, backlit, "
+                     "face not visible")
+
+
+def _norm(text: str) -> str:
+    t = unicodedata.normalize("NFKD", (text or "").casefold().replace("ß", "ss"))
+    return "".join(ch for ch in t if not unicodedata.combining(ch))
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", _norm(text))
+
+
+def title_matches(query: str, title: str) -> bool:
+    """Arşiv sonucunun başlığı sorgunun anlamlı sözcüklerinin en az yarısını (ya da son sözcüğünü) içermeli.
+    ('Stasi ID card' -> 'Putin-Stasi-Ausweis' reddedilir, 'Otto Graf Lambsdorff' -> '...Lambsdorff...' kabul)."""
+    q = [w for w in dict.fromkeys(_tokens(query)) if w not in _GENERIC]
+    if not q:
+        return True
+    words = set(_tokens(title))
+    flat = "".join(_tokens(title))
+    def hit(w: str) -> bool:
+        return w in words or (len(w) >= 4 and w in flat)
+
+    hits = sum(1 for w in q if hit(w))
+    # son anlamlı sözcük çoğunlukla soyadı/yer adıdır: 'Otto Graf Lambsdorff' için 'Lambsdorff' yeterli
+    surname = q[-1] if len(q[-1]) >= 5 and not q[-1].isdigit() else ""
+    return hits >= 1 and (hits / len(q) >= 0.5 or bool(surname and hit(surname)))
+
+
+def shows_known_person(*texts: str) -> bool:
+    return any(w in _IDENTITY_TAGS for t in texts for w in _tokens(t))
+
+
+def depicts_person(query: str) -> bool:
+    return any(w in _PERSON_WORDS for w in _tokens(query))
 
 
 @dataclass
@@ -305,6 +364,9 @@ class MediaGenerator:
         if not query:
             return False
         for c in self._wiki_candidates(query):
+            if not title_matches(query, c["title"]):
+                log.debug("Wikimedia sonucu konuyla eşleşmiyor, atlandı: %s (sorgu: %s)", c["title"], query)
+                continue
             if not self._claim(c["url"]):
                 continue
             img = self._wiki_download(c["url"])
@@ -351,7 +413,7 @@ class MediaGenerator:
         if not (self.pexels_ok and query):
             return False
         for v in self._pexels_search("video", query):
-            if int(v.get("duration") or 0) < STOCK_MIN_SECONDS:
+            if int(v.get("duration") or 0) < STOCK_MIN_SECONDS or shows_known_person(v.get("url", "")):
                 continue
             files = [f for f in v.get("video_files", [])
                      if f.get("file_type") == "video/mp4" and f.get("width") and f.get("link")
@@ -374,6 +436,8 @@ class MediaGenerator:
         if not (self.pexels_ok and query):
             return False
         for ph in self._pexels_search("photo", query):
+            if shows_known_person(ph.get("alt", ""), ph.get("url", "")):
+                continue
             src = ph.get("src") or {}
             url = src.get("large2x") or src.get("original")
             if not url or not self._claim(f"pexels-photo-{ph.get('id')}"):
@@ -423,7 +487,7 @@ class MediaGenerator:
         if not (self.pixabay_ok and query):
             return False
         for v in self._pixabay_search("video", query):
-            if int(v.get("duration") or 0) < STOCK_MIN_SECONDS:
+            if int(v.get("duration") or 0) < STOCK_MIN_SECONDS or shows_known_person(v.get("tags", "")):
                 continue
             files = [f for f in (v.get("videos") or {}).values()
                      if isinstance(f, dict) and f.get("url") and f.get("width")
@@ -446,6 +510,8 @@ class MediaGenerator:
         if not (self.pixabay_ok and query):
             return False
         for ph in self._pixabay_search("photo", query):
+            if shows_known_person(ph.get("tags", ""), ph.get("pageURL", "")):
+                continue
             url = ph.get("largeImageURL")
             if not url or not self._claim(f"pixabay-photo-{ph.get('id')}"):
                 continue
@@ -495,6 +561,12 @@ class MediaGenerator:
                         return True
                     if code and code != 200:
                         self._fail("pollinations", f"HTTP {code}", self._body(r))
+                    if code == 402 and "free_limit" in r.text.lower():
+                        # ücretsiz katman hız sınırı: kapatma, söylenen süre kadar bekleyip aynı modeli yeniden dene
+                        m = re.search(r"retry after (\d+)", r.text, re.I)
+                        time.sleep(min(int(m.group(1)) + 2, 90) if m else AI_MIN_INTERVAL_S)
+                        self.ai_spent += time.monotonic() - t0
+                        continue
                     self._ai_consec_fail += 1
                     if self._ai_consec_fail >= AI_MAX_CONSEC_FAIL:
                         self.ai_ok = False
@@ -549,7 +621,12 @@ class MediaGenerator:
         archive_q = shot.archive_query_en
         stock_q = shot.stock_query_en or archive_q or keywords(shot.ai_prompt_en)
         ai_prompt = shot.ai_prompt_en or stock_q
-        if shot.source == "archive_photo":
+        if shot.source == "archive_photo" and depicts_person(stock_q):
+            # Adı geçen kişinin arşiv fotoğrafı yoksa rastgele bir stok yüz yanıltıcı olur: siluet veya belge kullan
+            chain = (lambda: self._wikimedia(archive_q, img),
+                     lambda: self._pollinations(shot.ai_prompt_en or NEUTRAL_PERSON_AI, img, seed),
+                     lambda: self._stock_photo(NEUTRAL_ARCHIVE_STOCK, img))
+        elif shot.source == "archive_photo":
             chain = (lambda: self._wikimedia(archive_q, img),
                      lambda: self._stock_photo(stock_q, img),
                      lambda: stock_q != archive_q and self._wikimedia(stock_q, img),

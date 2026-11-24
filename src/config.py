@@ -106,6 +106,10 @@ TEXT_FALLBACK_MODELS = _env_list(
 LLM_MAX_RETRIES = _env_int("LLM_MAX_RETRIES", 5)
 LLM_BACKOFF_BASE_S = _env_int("LLM_BACKOFF_BASE_S", 6)   # 6, 12, 24, 48 ...
 LLM_BACKOFF_MAX_S = 60
+# 503 "high demand": aynı modelde bu kadar denemeden sonra sıradaki modele geç (5 deneme ~3 dk bekletiyordu)
+LLM_OVERLOAD_RETRIES = _env_int("LLM_OVERLOAD_RETRIES", 3)
+# Gemini tamamen yanıt vermezse bu süre boyunca çağrılar doğrudan yedek sağlayıcıya (NVIDIA NIM) gider
+LLM_PRIMARY_COOLDOWN_S = _env_int("LLM_PRIMARY_COOLDOWN_S", 600)
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +312,12 @@ CHANNEL_WATERMARK = "MAKROKONTEXT"
 # --------------------------------------------------------------------------- #
 UPLOAD_ENABLED = _env_bool("UPLOAD_ENABLED", True)
 # DİKKAT: API denetiminden (audit) geçmemiş projelerde YouTube her videoyu private'a kilitler.
-UPLOAD_PRIVACY = _env("UPLOAD_PRIVACY", "private").lower()
+UPLOAD_PRIVACY = _env("UPLOAD_PRIVACY", "public").lower()   # varsayılan: doğrudan yayında
+# Kalite kapısı (varsayılan KAPALI: her video doğrudan public). QUALITY_GATE=true yapılırsa public istenip
+# video bu eşikleri geçemediğinde private yüklenir (elle inceleme için).
+QUALITY_GATE = _env_bool("QUALITY_GATE", False)
+PUBLIC_MIN_SCORE = int(_env("PUBLIC_MIN_SCORE", "5"))            # eleştirmen genel puanı (0-10)
+PUBLIC_MAX_WEAK_VISUALS = float(_env("PUBLIC_MAX_WEAK_VISUALS", "0.25"))  # tekrar/boş kesit payı üst sınırı
 YT_CATEGORY_ID = _env("YT_CATEGORY_ID", "27")            # 27 = Education
 YT_MADE_FOR_KIDS = False
 YT_CONTAINS_SYNTHETIC_MEDIA = True                       # sentetik medya beyanı (zorunlu)

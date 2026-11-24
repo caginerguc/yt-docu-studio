@@ -15,9 +15,9 @@ on:
       privacy:
         description: 'YouTube gizlilik'
         required: true
-        default: 'private'
+        default: 'public'
         type: choice
-        options: [private, unlisted, public]
+        options: [public, unlisted, private]
       dry_run:
         description: 'Sadece üret, YouTube''a yükleme'
         required: false
@@ -67,14 +67,25 @@ jobs:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          UPLOAD_PRIVACY: ${{ inputs.privacy || 'private' }}
+          UPLOAD_PRIVACY: ${{ inputs.privacy || 'public' }}
           PYTHONUNBUFFERED: '1'
         run: |
-          ARGS="--lang ${{ inputs.language || 'de' }} --privacy ${{ inputs.privacy || 'private' }}"
+          ARGS="--lang ${{ inputs.language || 'de' }} --privacy ${{ inputs.privacy || 'public' }}"
           # Zamanlanmış çalıştırmada aynı gün ikinci video üretilmez; elle tetiklemede her zaman üretir.
           if [ "${{ github.event_name }}" = "schedule" ]; then ARGS="$ARGS --skip-if-done"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          # Geçici servis kesintilerine (Gemini 503 vb.) karşı: başarısız olursa 10 dk bekleyip bir kez daha dene.
+          # İkinci denemede --skip-if-done: video o gün zaten yüklendiyse tekrar yüklenmez.
+          set +e
           python main.py $ARGS
+          code=$?
+          if [ $code -ne 0 ] && [ $code -ne 2 ]; then
+            echo "::warning::İlk deneme başarısız (çıkış kodu $code). 10 dakika sonra yeniden denenecek."
+            sleep 600
+            python main.py $ARGS --skip-if-done
+            code=$?
+          fi
+          exit $code
 
       - name: Konu hafızasını kaydet
         if: always()
