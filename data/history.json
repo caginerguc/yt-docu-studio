@@ -123,5 +123,23 @@
     "date": "2026-11-24T14:26:01+01:00",
     "language": "de",
     "status": "selected"
+  },
+  {
+    "topic_id": "john-law-mississippi-spekulationsblase",
+    "headline": "Das Papiergeld-Experiment: John Law und der erste globale Finanzkollaps",
+    "wiki_main": "John Law",
+    "collection": "intrigen_und_zusammenbrueche",
+    "date": "2026-11-24T18:12:18+01:00",
+    "language": "de",
+    "status": "selected"
+  },
+  {
+    "topic_id": "theranos-elizabeth-holmes-medizin-skandal",
+    "headline": "Das Milliarden-Blut-Bluff: Der dokumentierte Fall Theranos und Elizabeth Holmes",
+    "wiki_main": "Elizabeth Holmes",
+    "collection": "intrigen_und_zusammenbrueche",
+    "date": "2026-11-24T19:42:19+01:00",
+    "language": "de",
+    "status": "selected"
   }
 ]
