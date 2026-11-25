@@ -161,5 +161,25 @@
     "language": "de",
     "status": "failed",
     "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
+  },
+  {
+    "topic_id": "qin-shihuangdi-mausoleum-geheimnisse",
+    "headline": "Das versiegelte Grab des ersten Kaisers: Die Akten von Qin Shihuangdi",
+    "wiki_main": "Mausoleum Qin Shihuangdis",
+    "collection": "geheimnis_der_steine",
+    "date": "2026-11-25T19:42:25+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
+  },
+  {
+    "topic_id": "goebekli-tepe-aelter-als-stonehenge",
+    "headline": "Göbekli Tepe – Das älteste bekannte Heiligtum der Menschheit",
+    "wiki_main": "Göbekli Tepe",
+    "collection": "geheimnis_der_steine",
+    "date": "2026-11-25T21:12:04+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
   }
 ]
