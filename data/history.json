@@ -141,5 +141,25 @@
     "date": "2026-11-24T19:42:19+01:00",
     "language": "de",
     "status": "selected"
+  },
+  {
+    "topic_id": "kaiser-maximilian-mexiko-napoleon-geheimvertrag",
+    "headline": "Das Blut-Empire in Mexiko: Maximilians Kaiserreich und Napoleons geheimes Goldgeschäft",
+    "wiki_main": "Maximilian I. (Mexiko)",
+    "collection": "dunkle_korridore",
+    "date": "2026-11-25T10:03:50+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
+  },
+  {
+    "topic_id": "qin-shihuangdi-mausoleum-geheimnis",
+    "headline": "Das ungeöffnete Kaisergrab: Die dokumentierten Rätsel von Qin Shihuangdi",
+    "wiki_main": "Mausoleum Qin Shihuangdis",
+    "collection": "geheimnis_der_steine",
+    "date": "2026-11-25T11:08:41+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
   }
 ]
