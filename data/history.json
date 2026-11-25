@@ -181,5 +181,25 @@
     "language": "de",
     "status": "failed",
     "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The provided client secret is invalid.', {'error': 'invalid_client', 'error_description': 'The provided client secret is invalid.'})"
+  },
+  {
+    "topic_id": "die-tengelmann-dynastie-und-das-verschwinden-von-karl-erivan-haub",
+    "headline": "Die Tengelmann-Dynastie: Ein Imperium im Schatten",
+    "wiki_main": "Tengelmann (Unternehmen)",
+    "collection": "intrigen_und_zusammenbrueche",
+    "date": "2026-11-25T22:34:38+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The OAuth client was not found.', {'error': 'invalid_client', 'error_description': 'The OAuth client was not found.'})"
+  },
+  {
+    "topic_id": "das-schattenarchiv-der-qin-dynastie",
+    "headline": "Die Militärarchive der Qin: Was die Gräber über den ersten Überwachungsstaat verraten",
+    "wiki_main": "Qin-Dynastie",
+    "collection": "dunkle_korridore",
+    "date": "2026-11-25T23:19:05+01:00",
+    "language": "de",
+    "status": "failed",
+    "error": "YouTube token yenilenemedi (refresh token iptal/süresi dolmuş olabilir): ('invalid_client: The OAuth client was not found.', {'error': 'invalid_client', 'error_description': 'The OAuth client was not found.'})"
   }
 ]
