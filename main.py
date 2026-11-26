@@ -81,6 +81,13 @@ def main() -> int:
     if args.skip_if_done and history.is_done_today(args.lang):
         log.info("Bugün %s dilinde zaten video üretildi; çıkılıyor.", args.lang)
         return 0
+    if upload:   # token/kanal sorunu 30 dk üretimden sonra değil, en başta yakalansın
+        from src.youtube_check import preflight
+        problem = preflight()
+        if problem:
+            log.error("Kritik: YouTube yüklemesi yapılamaz, üretim başlatılmadı: %s", problem)
+            return 2
+        log.info("YouTube ön kontrolü tamam (token ve kanal).")
 
     t0 = time.monotonic()
     plan = None
@@ -160,7 +167,7 @@ def main() -> int:
             up.add_captions(vid, renderer.srt_path, plan.language)
             actual_privacy = getattr(up, "last_privacy", privacy)
             history.set_status(plan.topic_id, "uploaded", video_id=vid, url=f"https://youtu.be/{vid}",
-                               privacy=actual_privacy)
+                               privacy=actual_privacy, requested_privacy=privacy)
             meta["video_id"] = vid
             meta["privacy"] = actual_privacy
             config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
