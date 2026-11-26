@@ -220,5 +220,18 @@
     "date": "2026-11-26T11:39:02+01:00",
     "language": "de",
     "status": "selected"
+  },
+  {
+    "topic_id": "die-flick-dynastie-und-der-deutsche-staat",
+    "headline": "Flick: Das Imperium, das Deutschland kaufte",
+    "wiki_main": "Friedrich Christian Flick",
+    "collection": "intrigen_und_zusammenbrueche",
+    "date": "2026-11-26T18:40:00+01:00",
+    "language": "de",
+    "status": "uploaded",
+    "video_id": "oHvVEAB9iic",
+    "url": "https://youtu.be/oHvVEAB9iic",
+    "privacy": "public",
+    "requested_privacy": "public"
   }
 ]
