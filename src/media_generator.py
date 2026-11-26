@@ -176,6 +176,8 @@ class MediaGenerator:
         self._ai_last = 0.0
         self._ai_auth_fail = 0
         self._ai_consec_fail = 0
+        self._ai_dead: set[str] = set()       # bu çalışmada devre dışı Pollinations adresleri / adres|model
+        self._ai_used: set[str] = set()
         self._wiki_lock = threading.Lock()
         self._wiki_last = 0.0
         self.pixabay_ok = bool(PIXABAY_API_KEY)
@@ -535,7 +537,9 @@ class MediaGenerator:
         full = quote(f"{prompt}, {config.ART_DIRECTION}")
         headers = {"Authorization": f"Bearer {config.POLLINATIONS_API_KEY}"} if config.POLLINATIONS_API_KEY else {}
         with self._ai_lock:                       # anonim kullanımda aynı anda tek istek
-            for model in config.POLLINATIONS_MODELS:
+            for base, model, classic in config.pollinations_routes():
+                if base in self._ai_dead or f"{base}|{model}" in self._ai_dead:
+                    continue
                 for attempt in range(3):
                     if not self.ai_ok:
                         return False
@@ -548,19 +552,38 @@ class MediaGenerator:
                     wait = AI_MIN_INTERVAL_S - (t0 - self._ai_last)
                     if wait > 0:
                         time.sleep(wait)
-                    url = (f"{config.POLLINATIONS_BASE_URL}/{full}?width={config.AI_IMAGE_W}&height={config.AI_IMAGE_H}"
-                           f"&seed={seed + attempt * 101}&model={model}&nologo=true&enhance=false")
+                    url = (f"{base}/{full}?width={config.AI_IMAGE_W}&height={config.AI_IMAGE_H}"
+                           f"&seed={seed + attempt * 101}&model={quote(model, safe='')}")
+                    if classic:                     # yalnızca Classic API'de belgelenmiş parametreler
+                        url += "&nologo=true&enhance=false"
                     r = self._fetch(url, "pollinations", headers=headers, timeout=AI_TIMEOUT)
                     self._ai_last = time.monotonic()
                     code = r.status_code if r is not None else 0
                     if code == 200 and self._save_image(r.content, path):
                         self.ai_spent += time.monotonic() - t0
                         self._ai_auth_fail = self._ai_consec_fail = 0
+                        if base not in self._ai_used:
+                            self._ai_used.add(base)
+                            log.info("Pollinations: %s API kullanılıyor (%s, model %s).",
+                                     "Classic" if classic else "yeni", base, model)
                         self._credit(Credit("pollinations", prompt[:80], "https://pollinations.ai", "AI generated"))
                         self._count("ai_image")
                         return True
                     if code and code != 200:
                         self._fail("pollinations", f"HTTP {code}", self._body(r))
+                    if not classic and code in (400, 401, 402, 403, 404):
+                        # Yeni API reddetti: anahtar/bakiye sorunu (401-403) veya model yok (404) -> bu çalışmada
+                        # o adres/model kapatılır; 400 (ör. içerik filtresi) yalnız bu görsel için. Classic API'ye geç.
+                        if code in (401, 402, 403):
+                            self._ai_dead.add(base)
+                            log.warning("Pollinations yeni API HTTP %d döndü (%s); bu çalışmada Classic API "
+                                        "kullanılacak. POLLINATIONS_API_KEY ve bakiyeyi kontrol et.",
+                                        code, self._body(r)[:160])
+                        elif code == 404:
+                            self._ai_dead.add(f"{base}|{model}")
+                            log.warning("Pollinations yeni API '%s' modelini bulamadı (HTTP 404).", model)
+                        self.ai_spent += time.monotonic() - t0
+                        break
                     if code == 402 and "free_limit" in r.text.lower():
                         # ücretsiz katman hız sınırı: kapatma, söylenen süre kadar bekleyip aynı modeli yeniden dene
                         m = re.search(r"retry after (\d+)", r.text, re.I)
