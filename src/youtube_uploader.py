@@ -34,6 +34,7 @@ class VideoMeta:
     language: str
     privacy: str = "private"
     category_id: str = config.YT_CATEGORY_ID
+    publish_at: str | None = None        # UTC ISO ('2026-11-28T17:00:00Z'): private yüklenir, o an public olur
 
 
 def _clean_tags(tags: list[str]) -> list[str]:
@@ -89,6 +90,8 @@ class YouTubeUploader:
             raise UploadError(f"Video bulunamadı: {video}")
         if meta.privacy not in {"private", "unlisted", "public"}:
             raise UploadError(f"Geçersiz gizlilik: {meta.privacy}")
+        if meta.publish_at and meta.privacy != "private":
+            raise UploadError("Zamanlanmış yayın (publish_at) yalnızca private yüklemeyle kullanılabilir.")
         lang = meta.language.lower()
         body = {
             "snippet": {
@@ -105,6 +108,8 @@ class YouTubeUploader:
                 "containsSyntheticMedia": config.YT_CONTAINS_SYNTHETIC_MEDIA,
             },
         }
+        if meta.publish_at:
+            body["status"]["publishAt"] = meta.publish_at
         media = MediaFileUpload(str(video), mimetype="video/mp4", chunksize=CHUNK, resumable=True)
         request = self._service().videos().insert(part="snippet,status", body=body, media_body=media)
         log.info("YouTube'a yükleniyor: '%s' (%s, %.0f MB)", body["snippet"]["title"], meta.privacy,

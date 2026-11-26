@@ -42,6 +42,40 @@ def music_credits(paths: list[Path], lang: str) -> str:
     return f"{_MUSIC_LABEL.get(lang, 'Music')}:\n" + "\n".join(lines) if lines else ""
 
 
+_SHORT_LINK = {"de": "Die ganze Dokumentation", "en": "Full documentary", "tr": "Belgeselin tamamı"}
+
+
+def produce_short(plan, renderer, long_video_id: str | None) -> None:
+    """Dikey fragmanı üretir; belgesel yüklendiyse Short'u zamanlanmış olarak (ertesi gün) yükler.
+    Buradaki hiçbir hata belgeseli etkilemez: yalnızca uyarı yazılır."""
+    if not config.SHORTS_ENABLED:
+        return
+    try:
+        from src.short_renderer import render_short
+        path, short = render_short(plan, renderer)
+        if path is None:
+            return
+        if not long_video_id:
+            log.info("Short hazır, yüklenmedi (dry-run): %s", path)
+            return
+        from src.agents_editorial import _DISCLOSURE
+        from src.youtube_uploader import VideoMeta, YouTubeUploader
+        publish_at, local = config.shorts_publish_at()
+        lang = plan.language.lower()
+        hashtags = " ".join(["#Shorts", *plan.seo.hashtags[:2]])
+        description = (f"{short.hook_text}\n\n{_SHORT_LINK.get(lang, _SHORT_LINK['en'])}: „{plan.seo.title}“\n"
+                       f"https://youtu.be/{long_video_id}\n\n{_DISCLOSURE.get(lang, _DISCLOSURE['en'])}\n\n{hashtags}")
+        up = YouTubeUploader()
+        sid = up.upload_video(path, VideoMeta(f"{short.title} #Shorts"[:100], description,
+                                              [*plan.seo.tags[:10], "Shorts"], plan.language, "private",
+                                              publish_at=publish_at))
+        history.set_status(plan.topic_id, "uploaded", short_video_id=sid, short_publish_at=publish_at)
+        log.info("Short yüklendi: https://youtu.be/%s, %s (%s) itibarıyla yayında olacak. YouTube Studio'da "
+                 "Short'un 'İlgili video' alanına belgeseli seçmeyi unutma.", sid, local, config.PUBLISH_TZ)
+    except Exception as e:
+        log.warning("Short üretilemedi veya yüklenemedi (belgesel etkilenmedi): %s", e)
+
+
 def quality_gate(plan, media_report: dict) -> list[str]:
     """Herkese açık yayını engelleyen nedenler (boşsa video yayına hazır)."""
     reasons = []
@@ -149,6 +183,7 @@ def main() -> int:
         if not upload:
             history.set_status(plan.topic_id, "produced")
             log.info("Yükleme kapalı (dry-run). Video: %s", video)
+            produce_short(plan, renderer, None)
         else:
             from src.youtube_uploader import VideoMeta, YouTubeUploader
             privacy = args.privacy
@@ -171,6 +206,7 @@ def main() -> int:
             meta["video_id"] = vid
             meta["privacy"] = actual_privacy
             config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            produce_short(plan, renderer, vid)
 
         log.info("=== Tamamlandı: %.1f dk ===", (time.monotonic() - t0) / 60)
         return 0

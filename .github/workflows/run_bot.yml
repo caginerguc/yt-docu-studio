@@ -112,6 +112,7 @@ jobs:
             output/metadata.json
             output/render.json
             output/credits.json
+            output/short.json
             output/subtitles.srt
             output/thumbnails/
 
@@ -121,4 +122,6 @@ jobs:
         with:
           name: video-${{ github.run_number }}
           retention-days: 3
-          path: output/final_documentary.mp4
+          path: |
+            output/final_documentary.mp4
+            output/short.mp4

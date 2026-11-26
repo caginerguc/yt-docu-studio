@@ -59,6 +59,36 @@ class SeoPlan(BaseModel):
     shorts_hook: str
 
 
+class ShortPlan(BaseModel):
+    """Dikey fragman (YouTube Short): belgeselden seçilen cümleler, aynı ses ve görüntüyle."""
+    sentence_ids: list[str]
+    hook_text: str          # ilk saniyelerde ekranda
+    title: str
+
+    @classmethod
+    def fallback(cls, acts: list["PlanAct"], seo: "SeoPlan", max_s: float = 46.0) -> "ShortPlan":
+        """Model seçim yapamazsa: 1. perdenin ilk cümleleri + perdeyi kapatan soru."""
+        first = acts[0].sentences if acts and acts[0].sentences else []
+
+        def secs(s: PlanSentence) -> float:
+            return s.words * 60 / config.WORDS_PER_MINUTE + config.SENTENCE_GAP_S
+
+        ids: list[str] = []
+        if first:
+            last = first[-1]
+            budget = max_s - secs(last)
+            for s in first[:-1]:
+                if secs(s) > budget:
+                    break
+                ids.append(s.id)
+                budget -= secs(s)
+            ids.append(last.id)
+        hook = seo.shorts_hook.strip()
+        if len(hook) > 70:
+            hook = hook[:67].rsplit(" ", 1)[0] + "…"
+        return cls(sentence_ids=ids, hook_text=hook, title=seo.title[:80])
+
+
 class ProductionPlan(BaseModel):
     topic_id: str
     language: str
@@ -72,6 +102,7 @@ class ProductionPlan(BaseModel):
     sources: list[SourceRef]
     acts: list[PlanAct]
     seo: SeoPlan
+    short: ShortPlan | None = None
     critique: dict = Field(default_factory=dict)
 
     def sentences(self) -> list[PlanSentence]:

@@ -26,7 +26,7 @@ from src.agent_researcher import Dossier, ResearchAgent
 from src.grounding import numbers_in, numbers_missing
 from src.llm import LLM, LLMError
 from src.llm_judge import JudgeLLM
-from src.plan import PlanAct, PlanSentence, PlanShot, ProductionPlan, SeoPlan, SourceRef
+from src.plan import PlanAct, PlanSentence, PlanShot, ProductionPlan, SeoPlan, ShortPlan, SourceRef
 
 log = logging.getLogger("makrokontext.editorial")
 
@@ -113,6 +113,12 @@ class Correction(BaseModel):
 
 class ProofreadResult(BaseModel):
     corrections: list[Correction]
+
+
+class ShortOut(BaseModel):
+    sentence_ids: list[str]
+    hook_text: str
+    title: str
 
 
 class ShotOut(BaseModel):
@@ -492,6 +498,63 @@ SCRIPT:
             fixed += 1
         return fixed
 
+    # -- 6b. fragman editörü (YouTube Short) ------------------------------------ #
+    def pick_short(self, acts: list[PlanAct], seo: SeoOut | SeoPlan) -> ShortPlan:
+        """Belgeselden 3-7 cümle seçer; Short bu cümlelerin kendi ses ve görüntüsüyle kurgulanır."""
+        by_id = {s.id: s for a in acts for s in a.sentences}
+        lo, hi = config.SHORTS_TARGET_S
+
+        def secs(ids: list[str]) -> float:
+            return sum(by_id[i].words * 60 / config.WORDS_PER_MINUTE + config.SENTENCE_GAP_S for i in ids)
+
+        def validate(o: ShortOut) -> None:
+            errs = []
+            bad = [i for i in o.sentence_ids if i not in by_id]
+            if bad:
+                errs.append(f"unknown sentence ids {bad[:4]}")
+            elif not 3 <= len(o.sentence_ids) <= 7 or len(set(o.sentence_ids)) != len(o.sentence_ids):
+                errs.append("pick 3-7 different sentence ids")
+            elif not lo <= secs(o.sentence_ids) <= hi:
+                errs.append(f"spoken length is ~{secs(o.sentence_ids):.0f}s; it must be {lo}-{hi}s")
+            if not 8 <= len(o.hook_text) <= 70:
+                errs.append("hook_text must be 8-70 characters")
+            if not 15 <= len(o.title) <= 80:
+                errs.append("title must be 15-80 characters")
+            dated = _DATED.search(f"{o.title} {o.hook_text}")
+            if dated:
+                errs.append(f"time-bound wording '{dated.group(0)}'")
+            if errs:
+                raise ValueError("; ".join(errs))
+
+        lines = "\n".join(f"{s.id} (~{s.words * 60 / config.WORDS_PER_MINUTE:.0f}s, {s.evidence}): {s.text}"
+                          for a in acts for s in a.sentences)
+        prompt = f"""You are the trailer editor. From the finished documentary script below, build a vertical
+YouTube Short that works as a TRAILER for the full film: {lo}-{hi} seconds of narration in total.
+Output language for hook_text and title: {self.lang.name}.
+
+RULES
+- Pick 3-7 sentence ids. They are played in the order you list them, with the original narration and footage,
+  so each one must make sense on its own (no 'he', 'this', 'that year' pointing at sentences you left out).
+- Open with the most striking documented sentence (belegt preferred), then build tension.
+- End on an OPEN QUESTION or unresolved tension taken from the script. Never reveal the answer, the twist
+  resolution or the ending: the viewer must want to watch the full film.
+- hook_text: on-screen text for the first 3 seconds, max 70 characters, a curiosity gap, no false promise.
+- title: the Short's title, max 80 characters, curiosity-driven but truthful, no hashtags, no ALL-CAPS.
+- Timeless: no current year, no 'aktuell', 'jetzt', 'this year'.
+
+FULL FILM TITLE: {seo.title}
+SUGGESTED HOOK: {seo.shorts_hook}
+
+SCRIPT (id (~seconds, evidence): text):
+{lines}"""
+        try:
+            o = self.llm.generate_json(prompt, ShortOut, system=self.system, temperature=0.4, validate=validate,
+                                       label="short")
+            return ShortPlan(sentence_ids=o.sentence_ids, hook_text=o.hook_text.strip(), title=o.title.strip())
+        except LLMError as e:
+            log.warning("Short seçimi yapılamadı, 1. perdeden varsayılan seçim kullanılacak: %s", e)
+            return ShortPlan.fallback(acts, seo)
+
     # -- 5. sinematograf ------------------------------------------------------ #
     def direct_act(self, act: PlanAct, d: Dossier) -> None:
         want = {s.id: shots_for(s) for s in act.sentences}
@@ -729,6 +792,9 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         seo = self.build_seo(acts, d, arc, variant)
         for a, title in zip(acts, seo.chapter_titles):
             a.chapter_title = title
+        short = self.pick_short(acts, seo) if config.SHORTS_ENABLED else None
+        if short:
+            log.info("Short: %d cümle %s | '%s'", len(short.sentence_ids), short.sentence_ids, short.title)
 
         plan = ProductionPlan(
             topic_id=cand.topic_id, language=self.lang.code, collection_id=cand.collection_id,
@@ -740,6 +806,7 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
                         hashtags=seo.hashtags[:3], thumbnail_text=seo.thumbnail_text,
                         thumbnail_tag=seo.thumbnail_tag, thumbnail_prompt_en=seo.thumbnail_prompt_en,
                         music_mood=seo.music_mood, shorts_hook=seo.shorts_hook),
+            short=short,
             critique={**scores, "factcheck": stats, "repeats_removed": len(repeats), "proofread_fixed": fixed,
                       "source_mix": mix},
         )

@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
@@ -206,6 +206,11 @@ VIDEO_W, VIDEO_H, FPS = 1920, 1080, 30
 KB_SUPERSAMPLE_W, KB_SUPERSAMPLE_H = 3840, 2160          # titremesiz zoompan için
 SHORTS_W, SHORTS_H = 1080, 1920
 SHORTS_MAX_SECONDS = 58
+# Short = belgeselin dikey fragmanı (seçilen cümlelerin ses+görüntüsü). Belgeselle aynı çalıştırmada yüklenir,
+# SHORTS_DELAY_DAYS gün sonra PUBLISH_LOCAL_TIME'da (PUBLISH_TZ) kendiliğinden yayına girer.
+SHORTS_ENABLED = _env_bool("SHORTS_ENABLED", True)
+SHORTS_DELAY_DAYS = _env_int("SHORTS_DELAY_DAYS", 1)
+SHORTS_TARGET_S = (28, 50)                               # anlatım süresi; + ~2.6 sn kapanış kartı
 
 MUSIC_VOLUME = 0.125                                     # ~ -18 dB
 DUCK_VOLUME = 0.06                                       # konuşma sırasında müzik
@@ -337,6 +342,13 @@ VIDEOS_PER_WEEK = 2                                      # bilgi amaçlı; cron 
 
 def now_local() -> datetime:
     return datetime.now(ZoneInfo(PUBLISH_TZ))
+
+
+def shorts_publish_at() -> tuple[str, str]:
+    """Short'un yayın anı: (YouTube için UTC ISO 'Z', log için yerel saat)."""
+    hh, mm = (int(x) for x in PUBLISH_LOCAL_TIME.split(":"))
+    local = (now_local() + timedelta(days=SHORTS_DELAY_DAYS)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), local.strftime("%d.%m.%Y %H:%M")
 
 
 def today_local_str() -> str:
