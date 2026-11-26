@@ -1,4 +1,4 @@
-﻿"""MakroKontext — uçtan uca otonom belgesel hattı.
+﻿"""Vor der Realität — uçtan uca otonom belgesel hattı.
 
   1 Araştırma (kaynak doğrulamalı dossier)
   2 Senaryo + kesit planı + SEO
@@ -58,7 +58,7 @@ def quality_gate(plan, media_report: dict) -> list[str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="MakroKontext otonom belgesel stüdyosu")
+    ap = argparse.ArgumentParser(description="Vor der Realität otonom belgesel stüdyosu")
     ap.add_argument("--lang", default=config.DEFAULT_LANG, type=str.lower, choices=sorted(config.LANGS))
     ap.add_argument("--privacy", default=config.UPLOAD_PRIVACY, type=str.lower,
                     choices=["private", "unlisted", "public"])
@@ -105,7 +105,7 @@ def main() -> int:
             from src.llm import LLM
             from src.llm_judge import JudgeLLM
 
-            log.info("=== MakroKontext başladı (dil: %s, gizlilik: %s) ===", args.lang, args.privacy)
+            log.info("=== Vor der Realität başladı (dil: %s, gizlilik: %s) ===", args.lang, args.privacy)
             llm = LLM()
             judge = JudgeLLM(llm)
             llm.secondary = judge        # Gemini kesintisinde (503/kota) tüm metin işleri NVIDIA NIM'e düşer

@@ -1,4 +1,4 @@
-"""MakroKontext V3 — merkezi konfigürasyon (Evergreen Gizem & Arşiv Serisi).
+"""Vor der Realität — merkezi konfigürasyon (Evergreen Gizem & Arşiv Serisi).
 
 Kurallar:
   * Sırlar (API anahtarları) koda yazılmaz, yalnızca ortam değişkeninden okunur.
@@ -312,7 +312,8 @@ THUMB_FONT_CANDIDATES = (
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
     Path("C:/Windows/Fonts/impact.ttf"),
 )
-CHANNEL_WATERMARK = "MAKROKONTEXT"
+CHANNEL_NAME = "Vor der Realität"
+CHANNEL_WATERMARK = CHANNEL_NAME.upper()            # kapakta sağ üst köşe
 
 
 # --------------------------------------------------------------------------- #
