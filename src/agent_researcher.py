@@ -106,7 +106,7 @@ class Dossier:
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RISK_RANK = {"low": 0, "medium": 1, "high": 2}
 
-SELECT_SYSTEM = """You are the chief researcher of MakroKontext, a documentary channel for EVERGREEN stories:
+SELECT_SYSTEM = f"""You are the chief researcher of {config.CHANNEL_NAME}, a documentary channel for EVERGREEN stories:
 hidden history, forgotten scientists, documented secret operations, historic artifacts, financial intrigues.
 Today's trend signals are only a springboard: you connect them to a timeless, well-documented story that will
 still be watched in five years. You never pick breaking news, never pick conspiracy myths, and never pick

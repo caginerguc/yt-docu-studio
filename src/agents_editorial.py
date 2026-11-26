@@ -182,6 +182,10 @@ bei mit nach von vom zum zur für über unter durch sich nicht nur noch schon da
 hat hatte haben diese dieser dieses diesem diesen sein seine seiner ihre ihrer the and of to in on for with from that
 this was were are is has had have bir ve ile bu bunu için olarak gibi daha çok""".split())
 DUP_OVERLAP = 0.6          # küçük cümlenin içerik köklerinin en az %60'ı öncekiyle aynıysa tekrar sayılır
+_YEAR = config.now_local().year
+# Kalıcı içerik: başlık/kapak/açıklamada güncel yıl ve "şimdi"ye bağlı ifadeler yasak
+_DATED = re.compile(rf"\b({_YEAR}|{_YEAR + 1}|aktuell\w*|derzeit|kürzlich|jetzt|dieses jahr|letztes jahr|"
+                    rf"this year|last year|latest|currently|recently|bu yıl|geçen yıl|şu an)\b", re.I)
 _NUM_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
@@ -222,6 +226,9 @@ NARRATION_RULES = f"""NARRATION RULES
   {config.MAX_SENTENCE_WORDS}). Occasionally one very short sentence after a long one.
 - Written for text-to-speech: no abbreviations, no parentheses, no markdown, no stage directions,
   no emojis, no lists. Write years, dates and amounts with digits (1981, 25 Millionen), never spelled out in words.
+- Timeless wording: the film must still be accurate in ten years. Never anchor a statement to the present
+  moment ('currently', 'recently', 'now', 'this year', 'last year', 'aktuell', 'kürzlich', 'derzeit',
+  'dieses Jahr'); name the year instead ('Im Jahr 2023'). 'Bis heute' only for facts that will stay true.
 - Every fact is told ONCE in the whole film. Never restate a fact that an earlier act already told; if needed,
   refer back to it in a few words and move on.
 - Every factual statement must come from the FACTS list. Never invent documents, quotes, dates, names or numbers.
@@ -244,7 +251,7 @@ class EditorialCrew:
         if getattr(self.llm, "secondary", True) is None:     # Gemini kesintisinde yazım NIM'e düşer
             self.llm.secondary = self.judge
         self.lang = config.get_lang(lang_code)
-        self.system = ("You are the writing room of MakroKontext, a documentary channel in the tradition of Arte, "
+        self.system = (f"You are the writing room of {config.CHANNEL_NAME}, a documentary channel in the tradition of Arte, "
                        f"Lemmino and Fern. Output language: {self.lang.name}. Accuracy beats drama.")
 
     # -- 1. mimari ----------------------------------------------------------- #
@@ -590,6 +597,9 @@ pan for reveals). Alternate source types so no more than 2 consecutive shots sha
             hit = next((b for b in config.TOPIC_BLOCKLIST if b in f"{o.title} {o.thumbnail_text}".lower()), None)
             if hit:
                 errs.append(f"forbidden term: {hit}")
+            dated = _DATED.search(f"{o.title} {o.thumbnail_text} {o.description_intro}")
+            if dated:
+                errs.append(f"time-bound wording '{dated.group(0)}': the packaging must stay timeless")
             if errs:
                 raise ValueError("; ".join(errs))
 
@@ -603,6 +613,8 @@ TASK
 - title: curiosity-driven but FULLY answerable inside the video; no false promise, no ALL-CAPS, no 'SCHOCK' bait;
   max 95 characters. Pattern: concrete subject + open question/tension.
 - description_intro: 2-3 sentences, no timestamps, no hashtags.
+- Timeless packaging: the video must still feel current in ten years. No current year, no 'neu', 'aktuell',
+  'jetzt', 'gerade', 'this year', 'latest' in title, description_intro or thumbnail_text.
 - chapter_titles: exactly 5 short chapter names (one per act, spoiler-free).
 - tags: 12-15 niche tags; hashtags: exactly 3 (with #).
 - thumbnail_text: 1-3 striking words that create a question (e.g. 'VERBOTENE AKTE', 'WER WAR ER?'), uppercase.

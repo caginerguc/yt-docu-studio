@@ -1,4 +1,4 @@
-"""MakroKontext V3 — Thumbnail kompozitörü (Pillow + numpy, tamamen ücretsiz/offline).
+"""Vor der Realität — Thumbnail kompozitörü (Pillow + numpy, tamamen ücretsiz/offline).
 
 Neden AI'dan metin istemiyoruz: Flux yazıyı tutarsız çizer, umlaut'ları bozar.
 Arka planı AI/arşiv görseli sağlar; başlığı, rengi, vinyeti ve ışığı burada kendimiz basarız:
@@ -268,9 +268,9 @@ def build_thumbnail(
         draw.rectangle([44, 40, 44 + tw + 36, 96], fill=palette["accent"] + (245,))
         draw.text((62, 68), tag, font=tfont, fill=(255, 255, 255, 255), anchor="lm")
 
-    # marka damgası
+    # marka damgası: sağ üst (sağ alt köşeyi YouTube'un süre etiketi kapatır; üst sol etiket bandına hizalı)
     wfont = load_font(26, font_path)
-    draw.text((W - 28, H - 22), config.CHANNEL_WATERMARK, font=wfont, fill=(255, 255, 255, 150), anchor="rs")
+    draw.text((W - 32, 68), config.CHANNEL_WATERMARK, font=wfont, fill=(255, 255, 255, 170), anchor="rm")
 
     final = _grain_and_sharpen(canvas, seed + variant)
 
