@@ -80,8 +80,8 @@ class SentenceTiming:
     end: float
 
 
-def _run(cmd: list[str], what: str) -> None:
-    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+def _run(cmd: list[str], what: str, cwd: Path | None = None) -> None:
+    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, cwd=cwd)
     if res.returncode != 0:
         tail = "\n".join(res.stderr.strip().splitlines()[-12:])
         raise RenderError(f"FFmpeg hatası ({what}), kod {res.returncode}:\n{tail}")
