@@ -173,9 +173,17 @@ CF_FLUX_MODEL = _env("CF_FLUX_MODEL", "@cf/black-forest-labs/flux-1-schnell")
 CF_FLUX_STEPS = _env_int("CF_FLUX_STEPS", 6)             # schnell için 1-8
 AI_IMAGE_W, AI_IMAGE_H = 1344, 768                       # üretim boyutu; render'da 1080p'ye ölçeklenir
 
-# Mevcut çalışan Pollinations endpoint'ini .env'de override edebilirsin.
-POLLINATIONS_BASE_URL = _env("POLLINATIONS_BASE_URL", "https://image.pollinations.ai/prompt")
-POLLINATIONS_MODELS = _env_list("POLLINATIONS_MODELS", ["flux", "turbo"])
+# Pollinations: önce yeni API (gen.pollinations.ai, sk_ anahtar ister), sorun olursa eski "Classic" API.
+POLLINATIONS_BASE_URL = _env("POLLINATIONS_BASE_URL", "https://gen.pollinations.ai/image")
+POLLINATIONS_MODELS = _env_list("POLLINATIONS_MODELS", ["flux"])
+POLLINATIONS_CLASSIC_URL = _env("POLLINATIONS_CLASSIC_URL", "https://image.pollinations.ai/prompt")
+POLLINATIONS_CLASSIC_MODELS = _env_list("POLLINATIONS_CLASSIC_MODELS", ["flux", "turbo"])
+
+
+def pollinations_routes() -> list[tuple[str, str, bool]]:
+    """(adres, model, klasik_mi) sırası. Yeni API anahtarsız çalışmadığı için anahtar yoksa yalnızca Classic API."""
+    new = [(POLLINATIONS_BASE_URL, m, False) for m in POLLINATIONS_MODELS] if POLLINATIONS_API_KEY else []
+    return new + [(POLLINATIONS_CLASSIC_URL, m, True) for m in POLLINATIONS_CLASSIC_MODELS]
 
 GEMINI_IMAGE_MODEL = _env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 
