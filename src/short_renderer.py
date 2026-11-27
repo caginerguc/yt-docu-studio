@@ -29,6 +29,8 @@ END_CARD_S = 2.6
 HOOK_S = 3.2                    # kanca yazısının ekranda kalma süresi
 FG_H, FG_Y = 1000, 460          # ön plan yüksekliği ve üst kenarı (üstü yazı, altı Shorts arayüzü için boş)
 CAP_WORDS = 4                   # altyazı parçası başına en fazla kelime
+CUT_TIMEOUT_S = 180             # tek kesit/birleştirme için FFmpeg süre sınırı
+COMPOSE_TIMEOUT_S = 900         # dikey kurgu için FFmpeg süre sınırı (takılırsa Short atlanır, iş sürer)
 LEAD_S, TAIL_S = 0.12, 0.25     # cümle sesinin öncesinden/sonrasından alınan pay
 FONT = "DejaVu Sans"            # Actions'ta fonts-dejavu-core ile kurulu; ▶ ve Ä/Ö/Ü/ß içerir
 
@@ -120,26 +122,33 @@ class ShortRenderer:
 
     # ------------------------------------------------------------------ #
     def _cut(self, segs: list[Segment]) -> tuple[Path, Path]:
-        """Belgeselden kesitleri al, birleştir; sona kapanış kartı için donmuş kare + sessizlik ekle."""
+        """Her cümleyi ayrı, basit bir FFmpeg çağrısıyla keser (girişte arama) ve parçaları kopyalayarak birleştirir.
+        Aynı girdiyi tek komutta birden çok trim dalıyla okumak FFmpeg 7+ zamanlayıcısında kilitlenebiliyor
+        (cümleler belgesel sırasında değilse); bu yüzden kesitler tek tek alınır."""
         video_src = self.work / "video_only.mp4"
         narr_src = self.work / "narration.wav"
         for p in (video_src, narr_src):
             if not p.exists():
                 raise FileNotFoundError(f"Belgesel ara dosyası yok: {p.name} (önce belgesel render edilmeli)")
-        fc, pairs = [], []
+        vparts, aparts = [], []
         for i, s in enumerate(segs):
             d = s.end - s.start
-            fc.append(f"[0:v]trim=start={s.start:.3f}:end={s.end:.3f},setpts=PTS-STARTPTS[v{i}]")
-            fc.append(f"[1:a]atrim=start={s.start:.3f}:end={s.end:.3f},asetpts=PTS-STARTPTS,"
-                      f"afade=t=in:d=0.03,afade=t=out:st={max(0.0, d - 0.06):.3f}:d=0.06[a{i}]")
-            pairs.append(f"[v{i}][a{i}]")
-        fc.append(f"{''.join(pairs)}concat=n={len(segs)}:v=1:a=1[vc][ac]")
-        fc.append(f"[vc]tpad=stop_mode=clone:stop_duration={END_CARD_S}[vv]")
-        fc.append(f"[ac]apad=pad_dur={END_CARD_S}[aa]")
+            v, a = self.work / f"short_seg{i}.mp4", self.work / f"short_seg{i}.wav"
+            _run(["ffmpeg", "-y", "-ss", f"{s.start:.3f}", "-i", str(video_src), "-frames:v",
+                  str(max(1, round(d * FPS))), "-an", *X264, str(v)], f"short kesit {i + 1} (görüntü)",
+                 timeout=CUT_TIMEOUT_S)
+            _run(["ffmpeg", "-y", "-ss", f"{s.start:.3f}", "-i", str(narr_src), "-t", f"{d:.3f}",
+                  "-af", f"afade=t=in:d=0.03,afade=t=out:st={max(0.0, d - 0.06):.3f}:d=0.06",
+                  "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(a)], f"short kesit {i + 1} (ses)",
+                 timeout=CUT_TIMEOUT_S)
+            vparts.append(v)
+            aparts.append(a)
         v_out, a_out = self.work / "short_h.mp4", self.work / "short_narr.wav"
-        _run(["ffmpeg", "-y", "-i", str(video_src), "-i", str(narr_src), "-filter_complex", ";".join(fc),
-              "-map", "[vv]", "-an", *X264, str(v_out),
-              "-map", "[aa]", "-vn", "-ar", str(SR), "-c:a", "pcm_s16le", str(a_out)], "short kesitleri")
+        for parts, out, what in ((vparts, v_out, "görüntü"), (aparts, a_out, "ses")):
+            lst = self.work / f"short_{what}.txt"
+            lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
+            _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)],
+                 f"short birleştirme ({what})", timeout=CUT_TIMEOUT_S)
         return v_out, a_out
 
     # ------------------------------------------------------------------ #
@@ -196,7 +205,7 @@ class ShortRenderer:
         if music:
             inputs += ["-stream_loop", "-1", "-ss", "12", "-i", str(music)]
         fc = [
-            "[0:v]split=2[b][f]",
+            f"[0:v]tpad=stop_mode=clone:stop_duration={END_CARD_S},split=2[b][f]",
             f"[b]scale=-2:{SH},crop={SW}:{SH},gblur=sigma=40,eq=brightness=-0.12:saturation=0.7[bg]",
             f"[f]scale=-2:{FG_H},crop={SW}:{FG_H}[fg]",
             f"[bg][fg]overlay=0:{FG_Y},drawbox=x=0:y=0:w=iw:h=ih:color=black@0.62:t=fill:"
@@ -204,17 +213,17 @@ class ShortRenderer:
         ]
         norm = f"aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo"
         if music:
-            fc += [f"[1:a]{norm},asplit=2[voice][key]",
+            fc += [f"[1:a]apad=pad_dur={END_CARD_S},{norm},asplit=2[voice][key]",
                    f"[2:a]{norm},atrim=0:{total:.3f},loudnorm=I={MUSIC_LUFS + 2}:TP=-8:LRA=14,aresample={SR},"
                    f"afade=t=in:d=0.6,afade=t=out:st={max(0.0, total - 1.6):.3f}:d=1.6[bed]",
                    "[bed][key]sidechaincompress=threshold=0.015:ratio=6:attack=40:release=700:makeup=1[duck]",
                    "[voice][duck]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]"]
         else:
-            fc.append(f"[1:a]{norm},loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+            fc.append(f"[1:a]apad=pad_dur={END_CARD_S},{norm},loudnorm=I=-14:TP=-1.5:LRA=11[a]")
         tmp = self.out.with_suffix(".part.mp4")
         _run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]",
               "-t", f"{total:.3f}", *X264, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-              str(tmp.resolve())], "short kurgu", cwd=self.work)
+              str(tmp.resolve())], "short kurgu", cwd=self.work, timeout=COMPOSE_TIMEOUT_S)
         tmp.replace(self.out)
 
     # ------------------------------------------------------------------ #
@@ -224,7 +233,7 @@ class ShortRenderer:
             log.warning("Short: seçilecek cümle bulunamadı, Short üretilmedi.")
             return None
         v_in, a_in = self._cut(segs)
-        total = probe_duration(a_in)
+        total = probe_duration(a_in) + END_CARD_S
         ass = self._ass(segs, total)
         self._compose(v_in, a_in, ass, total)
         real = probe_duration(self.out)
