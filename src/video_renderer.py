@@ -80,8 +80,12 @@ class SentenceTiming:
     end: float
 
 
-def _run(cmd: list[str], what: str, cwd: Path | None = None) -> None:
-    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, cwd=cwd)
+def _run(cmd: list[str], what: str, cwd: Path | None = None, timeout: float | None = None) -> None:
+    try:
+        res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                             text=True, cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RenderError(f"FFmpeg {timeout:.0f} sn içinde bitmedi ({what}); işlem durduruldu.") from e
     if res.returncode != 0:
         tail = "\n".join(res.stderr.strip().splitlines()[-12:])
         raise RenderError(f"FFmpeg hatası ({what}), kod {res.returncode}:\n{tail}")
