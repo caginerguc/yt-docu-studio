@@ -233,5 +233,18 @@
     "url": "https://youtu.be/oHvVEAB9iic",
     "privacy": "public",
     "requested_privacy": "public"
+  },
+  {
+    "topic_id": "konrad-zuse-z4-geheimcode-in-den-alpen",
+    "headline": "Der Versteckte Computer: Konrad Zuses Z4 und die Jagd der Alliierten auf deutsche Hochtechnologie",
+    "wiki_main": "Konrad Zuse",
+    "collection": "schatten_genies",
+    "date": "2026-11-27T11:28:02+01:00",
+    "language": "de",
+    "status": "uploaded",
+    "video_id": "p-33ESoqeBw",
+    "url": "https://youtu.be/p-33ESoqeBw",
+    "privacy": "public",
+    "requested_privacy": "public"
   }
 ]
