@@ -200,9 +200,10 @@ def main() -> int:
                                                    plan.language, privacy))
             up.set_thumbnail(vid, thumb)
             up.add_captions(vid, renderer.srt_path, plan.language)
+            up.add_to_collection_playlist(vid, plan.collection_id)
             actual_privacy = getattr(up, "last_privacy", privacy)
             history.set_status(plan.topic_id, "uploaded", video_id=vid, url=f"https://youtu.be/{vid}",
-                               privacy=actual_privacy, requested_privacy=privacy)
+                               privacy=actual_privacy, requested_privacy=privacy, collection_id=plan.collection_id)
             meta["video_id"] = vid
             meta["privacy"] = actual_privacy
             config.METADATA_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
