@@ -187,12 +187,26 @@ _DUP_STOP = frozenset("""der die das den dem des ein eine einer eines einem eine
 bei mit nach von vom zum zur für über unter durch sich nicht nur noch schon dann wird wurde wurden sind ist war waren
 hat hatte haben diese dieser dieses diesem diesen sein seine seiner ihre ihrer the and of to in on for with from that
 this was were are is has had have bir ve ile bu bunu için olarak gibi daha çok""".split())
+ACT_MIN_SHARE = 0.8        # bölüm taslağı, kelime bütçesinin en az %80'i olmalı; değilse uzatılması istenir
+ACT_LENGTH_RETRIES = 2     # kısa taslak için en fazla ek deneme (eleştirmen sonrası yeniden yazımda 1)
+TOTAL_MIN_SHARE = 0.85     # senaryonun tamamı hedefin %85'inin altındaysa en kısa bölümler uzatılır
+MAX_EXTEND_ACTS = 2
 DUP_OVERLAP = 0.6          # küçük cümlenin içerik köklerinin en az %60'ı öncekiyle aynıysa tekrar sayılır
 _YEAR = config.now_local().year
 # Kalıcı içerik: başlık/kapak/açıklamada güncel yıl ve "şimdi"ye bağlı ifadeler yasak
 _DATED = re.compile(rf"\b({_YEAR}|{_YEAR + 1}|aktuell\w*|derzeit|kürzlich|jetzt|dieses jahr|letztes jahr|"
                     rf"this year|last year|latest|currently|recently|bu yıl|geçen yıl|şu an)\b", re.I)
 _NUM_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _narration_numbers(acts: list[PlanAct]) -> set[str]:
+    """Anlatımda geçen yıl ve sayılar (en az 3 hane): ambalaj yalnızca bunları kullanabilir."""
+    return numbers_in(" ".join(s.text for a in acts for s in a.sentences))
+
+
+def _unbacked_numbers(o: "SeoOut", acts: list[PlanAct]) -> list[str]:
+    """Başlık / kapak yazısı / kapak etiketinde geçip videoda hiç söylenmeyen yıl ve sayılar (abartı tıklama tuzağı)."""
+    return numbers_missing(f"{o.title} {o.thumbnail_text} {o.thumbnail_tag}", _narration_numbers(acts))
 
 
 def _content_stems(text: str) -> set[str]:
@@ -366,8 +380,34 @@ LAST SENTENCES OF THE PREVIOUS ACT (continue smoothly, do not recap): {tail or '
 {('REVIEWER FEEDBACK TO FIX:' + chr(10) + feedback) if feedback else ''}{prior}
 
 Return the sentences of this act only."""
-        draft = self.llm.generate_json(prompt, ActDraft, system=self.system, temperature=0.75,
-                                       validate=None, label=f"act{act_cfg['id']}")
+        # Uzunluk denetimi: kısa taslak en fazla 1-2 kez uzatılarak yeniden istenir; en uzun taslak kullanılır.
+        # (İş hiçbir zaman bu yüzden durmaz; ikinci denemeler başarısız olursa eldeki en iyi taslakla sürer.)
+        min_words = int(budget * ACT_MIN_SHARE)
+        retries = 1 if previous else ACT_LENGTH_RETRIES
+        draft, best_words, ask = None, -1, prompt
+        for attempt in range(retries + 1):
+            try:
+                got = self.llm.generate_json(ask, ActDraft, system=self.system, temperature=0.75,
+                                             validate=None, label=f"act{act_cfg['id']}")
+            except LLMError:
+                if draft is None:
+                    raise
+                log.warning("[act%d] uzatma denemesi başarısız, eldeki taslakla devam.", act_cfg["id"])
+                break
+            words = sum(len(x.text.split()) for x in got.sentences)
+            if words > best_words:
+                draft, best_words = got, words
+            if best_words >= min_words or attempt == retries:
+                break
+            log.warning("[act%d] taslak kısa: %d kelime (en az %d, hedef %d); uzatılması isteniyor (%d/%d).",
+                        act_cfg["id"], words, min_words, budget, attempt + 1, retries)
+            ask = (f"{prompt}\n\nYOUR PREVIOUS ANSWER WAS TOO SHORT: {words} words, but this act needs at least "
+                   f"{int(budget * 0.9)} words (about {round(budget * 0.9 / 15)} sentences). Write the WHOLE act again: "
+                   "keep its strongest sentences and add documented detail from FACTS and RESERVE FACTS (names, places, "
+                   "dates, figures, consequences, the human side). No filler, no repetition, no recap.\n"
+                   "PREVIOUS TOO-SHORT ANSWER:\n" + "\n".join(x.text for x in got.sentences))
+        if best_words < min_words:
+            log.warning("[act%d] taslak hedefin altında kaldı: %d kelime (hedef %d).", act_cfg["id"], best_words, budget)
         return [PlanSentence(id="", act_id=act_cfg["id"], text=clean_sentence(x.text), evidence=x.evidence,
                              fact_ids=x.fact_ids, pause_before=x.pause_before) for x in draft.sentences]
 
@@ -663,14 +703,23 @@ pan for reveals). Alternate source types so no more than 2 consecutive shots sha
             dated = _DATED.search(f"{o.title} {o.thumbnail_text} {o.description_intro}")
             if dated:
                 errs.append(f"time-bound wording '{dated.group(0)}': the packaging must stay timeless")
+            invented = _unbacked_numbers(o, acts)
+            if invented:
+                errs.append(f"number(s) {', '.join(invented)} in title/thumbnail_text/thumbnail_tag do not occur in "
+                            "the narration: packaging may only use years and figures the video actually states")
             if errs:
                 raise ValueError("; ".join(errs))
 
-        opening = " ".join(a.sentences[0].text for a in acts if a.sentences)
+        narration = " ".join(s.text for a in acts for s in a.sentences)
         prompt = f"""You are the YouTube packaging editor. Output language: {self.lang.name}.
 TOPIC: {arc.working_title}
-OPENING LINES OF EACH ACT: {opening}
 TWIST FACT: {next((f.claim for f in d.facts if f.id == arc.twist_fact_id), '')}
+FULL NARRATION OF THE VIDEO (the packaging must be backed by this text):
+{narration[:16000]}
+
+PACKAGING TRUTH: viewers who click must get what title and thumbnail promise. Every event, claim, name, year and
+figure in title, thumbnail_text and thumbnail_tag must actually occur in the FULL NARRATION above, and the question
+the thumbnail raises must be answered in it. Sharpen and dramatise what is there; never add what is not.
 
 TASK
 - title: curiosity-driven but FULLY answerable inside the video; no false promise, no ALL-CAPS, no 'SCHOCK' bait;
@@ -720,9 +769,55 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         o.thumbnail_text = " ".join(words) or cut(arc.working_title.upper(), 20)
         if any(b in o.thumbnail_text.lower() for b in config.TOPIC_BLOCKLIST):
             o.thumbnail_text = cut(arc.working_title.upper(), 20)
+        # Kurallar tutmadığında (serbest üretim) videoda geçmeyen yıl/sayıyı ambalajdan çıkar
+        nums = _narration_numbers(acts)
+        if numbers_missing(o.title, nums):
+            log.warning("SEO: başlıkta videoda geçmeyen sayı var (%s), çalışma başlığı kullanılıyor", o.title)
+            o.title = cut(arc.working_title, 95)
+        if numbers_missing(o.thumbnail_text, nums):
+            o.thumbnail_text = cut(arc.working_title.upper(), 20)
+        if numbers_missing(o.thumbnail_tag, nums):
+            log.warning("SEO: kapak etiketi videoda geçmeyen sayı içeriyor (%s), etiket kaldırıldı", o.thumbnail_tag)
+            o.thumbnail_tag = ""
         if "no text" not in o.thumbnail_prompt_en.lower():
             o.thumbnail_prompt_en += ", no text, no watermark"
         return o
+
+    # -- 2b. uzunluk ---------------------------------------------------------- #
+    def ensure_length(self, acts: list[PlanAct], d: Dossier, arc_by_id: dict, target: int, variant: str) -> None:
+        """Senaryo hedefin çok altındaysa bütçesine göre en kısa kalan bölümleri (en fazla 2) uzatarak yeniden yazar.
+        Doğrulama (fact-check) bundan sonra çalıştığı için eklenen cümleler de denetlenir."""
+        total = sum(len(s.text.split()) for a in acts for s in a.sentences)
+        if total >= target * TOTAL_MIN_SHARE:
+            return
+        log.warning("Senaryo kısa: %d kelime (hedef %d, en az %d); en kısa bölümler uzatılıyor.", total, target,
+                    int(target * TOTAL_MIN_SHARE))
+        budgets = {c["id"]: round(target * c["share"]) for c in config.ACTS}
+
+        def deficit(a: PlanAct) -> float:
+            return 1 - sum(len(s.text.split()) for s in a.sentences) / max(1, budgets[a.act_id])
+
+        for act in sorted(acts, key=deficit, reverse=True)[:MAX_EXTEND_ACTS]:
+            if deficit(act) <= 1 - ACT_MIN_SHARE:
+                continue
+            words = sum(len(s.text.split()) for s in act.sentences)
+            cfg = next(c for c in config.ACTS if c["id"] == act.act_id)
+            idx = acts.index(act)
+            prior_used = {f for a in acts if a.act_id < act.act_id for s in a.sentences for f in s.fact_ids}
+            tail_prev = " ".join(s.text for s in acts[idx - 1].sentences[-3:]) if idx else ""
+            fb = (f"- This act has only {words} words but needs about {budgets[act.act_id]}. Extend it with documented "
+                  "detail (facts and reserve facts) while keeping its strongest sentences and its ending question.")
+            try:
+                new = self.write_act(cfg, arc_by_id[act.act_id], d, budgets[act.act_id], tail_prev, prior_used,
+                                     variant, feedback=fb, previous=act.sentences)
+            except LLMError as e:
+                log.warning("Bölüm %d uzatılamadı, eski hali kalıyor: %s", act.act_id, e)
+                continue
+            if sum(len(s.text.split()) for s in new) > words:
+                act.sentences = new
+                renumber(acts)
+        log.info("Uzunluk düzeltmesi sonrası: %d kelime (hedef %d).",
+                 sum(len(s.text.split()) for a in acts for s in a.sentences), target)
 
     # -- ana akış -------------------------------------------------------------- #
     def produce(self, d: Dossier) -> ProductionPlan:
@@ -780,6 +875,7 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         if best is not None:   # en yüksek puanlı sürüm kalır; yeniden yazım kötüleştirdiyse eskisine dönülür
             log.info("Kullanılan senaryo sürümü: genel puan %d", best[0])
             acts, scores = best[1], best[2]
+        self.ensure_length(acts, d, arc_by_id, target, variant)
 
         stats = self.fact_check(acts, d)
         repeats = drop_repeated_sentences(acts)

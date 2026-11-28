@@ -116,6 +116,7 @@ jobs:
             output/render.json
             output/credits.json
             output/short.json
+            output/short_debug/
             output/subtitles.srt
             output/thumbnails/
 
