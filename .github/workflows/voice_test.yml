@@ -1,0 +1,40 @@
+name: Ses Denemesi
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  voices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Depoyu çek
+        uses: actions/checkout@v4
+
+      - name: FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bağımlılıklar
+        run: pip install "edge-tts>=6.1.12" numpy
+
+      - name: Sesleri üret
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python voice_test.py
+
+      - name: Ses dosyaları (7 gün)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ses-denemesi
+          retention-days: 7
+          path: output/voice_test/
