@@ -124,13 +124,23 @@ LLM_PRIMARY_COOLDOWN_S = _env_int("LLM_PRIMARY_COOLDOWN_S", 600)
 # --------------------------------------------------------------------------- #
 COLLECTIONS = (
     {"id": "schatten_genies", "name": "Schattengenies",
-     "brief": "Bilim insanlarının az bilinen, belgelenmiş yönleri ve el konulan/unutulan çalışmaları."},
+     "brief": "Bilim insanlarının az bilinen, belgelenmiş yönleri ve el konulan/unutulan çalışmaları.",
+     "playlist": "Schattengenies – vergessene Forscher & Erfinder",
+     "playlist_desc": "Wissenschaftler, Erfinder und Ingenieure, deren Arbeit beschlagnahmt, verdrängt oder vergessen "
+                      "wurde – erzählt anhand belegter Quellen."},
     {"id": "dunkle_korridore", "name": "Dunkle Korridore der Macht",
-     "brief": "Siyaset ve istihbaratın belgelenmiş gizli operasyonları (Gladio, Crypto AG gibi)."},
+     "brief": "Siyaset ve istihbaratın belgelenmiş gizli operasyonları (Gladio, Crypto AG gibi).",
+     "playlist": "Dunkle Korridore der Macht – Politik, Geld & Geheimdienste",
+     "playlist_desc": "Dokumentierte Skandale, verdeckte Zahlungen und Geheimoperationen aus Politik, Wirtschaft "
+                      "und Nachrichtendiensten."},
     {"id": "geheimnis_der_steine", "name": "Das Geheimnis der Steine",
-     "brief": "Tarihi eserler ve yapılar: çözülmüş ve hâlâ tartışmalı sırlar."},
+     "brief": "Tarihi eserler ve yapılar: çözülmüş ve hâlâ tartışmalı sırlar.",
+     "playlist": "Das Geheimnis der Steine – Rätsel der Geschichte",
+     "playlist_desc": "Monumente, Gräber und Artefakte: gelöste und bis heute umstrittene Rätsel der Geschichte."},
     {"id": "intrigen_und_zusammenbrueche", "name": "Intrigen & Zusammenbrüche",
-     "brief": "Belgelenmiş finansal çöküşler ve entrikalar (1929, Doğu Hindistan Şirketi vb.)."},
+     "brief": "Belgelenmiş finansal çöküşler ve entrikalar (1929, Doğu Hindistan Şirketi vb.).",
+     "playlist": "Intrigen & Zusammenbrüche – Betrug, Affären, Crashs",
+     "playlist_desc": "Betrugsfälle, Finanzkrisen und Intrigen, die Märkte, Höfe und Staaten erschütterten."},
 )
 
 # Konu havuzundan otomatik elenir: komplo efsaneleri / nefret söylemiyle bağlantılı anlatılar.
@@ -330,6 +340,22 @@ THUMB_FONT_CANDIDATES = (
     Path("C:/Windows/Fonts/impact.ttf"),
 )
 CHANNEL_NAME = "Vor der Realität"
+CHANNEL_HANDLE = "@VorDerRealitaet"
+CHANNEL_COUNTRY = "DE"
+CHANNEL_KEYWORDS = ('Dokumentation Doku Geschichte "Deutsche Geschichte" Zeitgeschichte Skandal Affäre Geheimakten '
+                    'Geheimdienst Spionage "ungelöste Rätsel" Mysterien Wirtschaftsgeschichte Betrug Archiv '
+                    '"Vor der Realität"')
+CHANNEL_DESCRIPTION = (
+    "Vor der Realität öffnet die Akten, die lieber verschlossen geblieben wären.\n\n"
+    "Wir erzählen wahre Geschichten über politische Skandale, Geheimoperationen, verschwundene Vermögen und "
+    "ungelöste Rätsel – von der Antike bis in die jüngere Vergangenheit. Jede Folge stützt sich auf belegte "
+    "Quellen: Was gesichert ist, nennen wir gesichert. Was offen ist, bleibt offen. Spekulation kennzeichnen wir "
+    "als Spekulation.\n\n"
+    "Neue Dokumentationen jeden Mittwoch und Sonntag.\n\n"
+    "Transparenz: Recherche, Sprecherstimme und ein Teil der Bilder entstehen mit KI-gestützten Werkzeugen. "
+    "Die Quellen jeder Folge findest du in der Videobeschreibung.\n\n"
+    "Abonniere den Kanal, wenn du wissen willst, was hinter der offiziellen Version steckt."
+)
 CHANNEL_WATERMARK = CHANNEL_NAME.upper()
 
 

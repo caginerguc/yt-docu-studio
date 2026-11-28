@@ -152,6 +152,48 @@ class YouTubeUploader:
         self.last_privacy = actual
         return vid
 
+    # ------------------------------------------------------------------ #
+    def find_or_create_playlist(self, title: str, description: str = "", language: str = "de") -> str:
+        yt = self._service()
+        token = None
+        while True:
+            res = yt.playlists().list(part="snippet", mine=True, maxResults=50, pageToken=token).execute()
+            for p in res.get("items", []):
+                if p["snippet"]["title"].strip() == title.strip():
+                    return p["id"]
+            token = res.get("nextPageToken")
+            if not token:
+                break
+        body = {"snippet": {"title": title, "description": description, "defaultLanguage": language},
+                "status": {"privacyStatus": "public"}}
+        pid = yt.playlists().insert(part="snippet,status", body=body).execute()["id"]
+        log.info("Oynatma listesi oluşturuldu: %s", title)
+        return pid
+
+    def add_to_playlist(self, playlist_id: str, video_id: str) -> bool:
+        """Video listede yoksa ekler (tekrar eklemez)."""
+        yt = self._service()
+        have = yt.playlistItems().list(part="id", playlistId=playlist_id, videoId=video_id, maxResults=1).execute()
+        if have.get("items"):
+            return False
+        yt.playlistItems().insert(part="snippet", body={"snippet": {
+            "playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
+        return True
+
+    def add_to_collection_playlist(self, video_id: str, collection_id: str | None) -> str | None:
+        """Belgeseli koleksiyonunun oynatma listesine ekler. Hata belgeseli etkilemez (yalnız uyarı)."""
+        col = next((c for c in config.COLLECTIONS if c["id"] == collection_id), None)
+        if not col or not col.get("playlist"):
+            return None
+        try:
+            pid = self.find_or_create_playlist(col["playlist"], col.get("playlist_desc", ""))
+            if self.add_to_playlist(pid, video_id):
+                log.info("Oynatma listesine eklendi: %s", col["playlist"])
+            return pid
+        except Exception as e:
+            log.warning("Oynatma listesine eklenemedi (%s): %s", col["playlist"], str(e)[:200])
+            return None
+
     def set_thumbnail(self, video_id: str, thumb: Path | None) -> bool:
         if not thumb or not thumb.exists():
             return False
