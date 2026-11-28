@@ -261,5 +261,19 @@
     "requested_privacy": "public",
     "short_video_id": "veL-vuiHscI",
     "short_publish_at": "2026-11-29T17:00:00Z"
+  },
+  {
+    "topic_id": "krypto-ag-und-die-globale-ueberwachung",
+    "headline": "Operation Rubikon: Als der Geheimdienst den Weltmarkt belauschte",
+    "wiki_main": "Crypto AG",
+    "collection": "dunkle_korridore",
+    "date": "2026-11-28T14:28:26+01:00",
+    "language": "de",
+    "status": "uploaded",
+    "video_id": "UEX6ecWnXU8",
+    "url": "https://youtu.be/UEX6ecWnXU8",
+    "privacy": "public",
+    "requested_privacy": "public",
+    "collection_id": "dunkle_korridore"
   }
 ]
