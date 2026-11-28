@@ -7,6 +7,8 @@ böylece videodakiyle aynı duyulur. Çıktı: output/voice_test/*.mp3 (+ LISTE.
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import subprocess
 import sys
 import wave
@@ -36,6 +38,14 @@ VOICES = [
     ("3_Florian", "de-DE-FlorianMultilingualNeural", "yeni nesil erkek ses, daha doğal tonlama"),
     ("4_Seraphina", "de-DE-SeraphinaMultilingualNeural", "yeni nesil kadın ses, sıcak"),
 ]
+# Google Cloud Text-to-Speech (Chirp 3 HD): yalnızca GOOGLE_TTS_API_KEY tanımlıysa denenir
+GOOGLE_VOICES = [
+    ("5_Google_Charon", "de-DE-Chirp3-HD-Charon", "Google Chirp 3 HD: bilgilendirici erkek ses"),
+    ("6_Google_Algenib", "de-DE-Chirp3-HD-Algenib", "Google Chirp 3 HD: pürüzlü, kalın erkek ses"),
+    ("7_Google_Orus", "de-DE-Chirp3-HD-Orus", "Google Chirp 3 HD: kararlı erkek ses"),
+    ("8_Google_Sadaltager", "de-DE-Chirp3-HD-Sadaltager", "Google Chirp 3 HD: bilgili erkek ses"),
+]
+GOOGLE_RATES = [("a_094", 0.94, "%6 yavaş (botun ayarı)"), ("b_088", 0.88, "%12 yavaş, daha ağır")]
 # (ek, hız, ton, açıklama)
 SETTINGS = [
     ("a_mevcut", "-8%", "+0Hz", "botun şu anki ayarı (%8 yavaş)"),
@@ -43,7 +53,9 @@ SETTINGS = [
 ]
 
 
-async def _tts(text: str, voice: str, rate: str, pitch: str, path: Path) -> None:
+async def _tts(text: str, voice: str, rate, pitch: str, path: Path) -> None:
+    if "Chirp3" in voice:
+        return _google(text, voice, rate, path)
     import edge_tts
 
     for attempt in range(3):
@@ -55,6 +67,18 @@ async def _tts(text: str, voice: str, rate: str, pitch: str, path: Path) -> None
             print(f"  uyarı: {voice} deneme {attempt + 1}: {e}", file=sys.stderr)
         await asyncio.sleep(2 + 3 * attempt)
     raise RuntimeError(f"{voice} seslendirilemedi")
+
+
+def _google(text: str, voice: str, rate: float, path: Path) -> None:
+    import requests
+
+    body = {"input": {"text": text}, "voice": {"languageCode": voice.split("-Chirp3")[0], "name": voice},
+            "audioConfig": {"audioEncoding": "MP3", "sampleRateHertz": 24000, "speakingRate": rate}}
+    r = requests.post("https://texttospeech.googleapis.com/v1/text:synthesize",
+                      params={"key": os.environ["GOOGLE_TTS_API_KEY"]}, json=body, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Google HTTP {r.status_code}: {r.text[:200]}")
+    path.write_bytes(base64.b64decode(r.json()["audioContent"]))
 
 
 def _decode_trimmed(mp3: Path) -> np.ndarray:
@@ -105,14 +129,29 @@ async def main() -> int:
             out = OUT / f"{vname}_{sname}.mp3"
             try:
                 secs = await make(f"{vname}_{sname}", voice, rate, pitch, out)
-                lines.append(f"{out.name:28s} {voice}  hız {rate}, ton {pitch}  ({secs:.0f} sn)")
-                print(f"tamam: {out.name} ({secs:.0f} sn)")
+                lines.append(f"{out.name:28s} {voice}  hız {rate}, ton {pitch}  ({secs:.1f} sn)")
+                print(f"tamam: {out.name} ({secs:.1f} sn)")
             except Exception as e:
                 failed += 1
                 lines.append(f"{out.name:28s} ÜRETİLEMEDİ: {e}")
                 print(f"HATA: {out.name}: {e}", file=sys.stderr)
         lines.append(f"    -> {vdesc}")
         lines.append("")
+    if os.environ.get("GOOGLE_TTS_API_KEY"):
+        for vname, voice, vdesc in GOOGLE_VOICES:
+            for sname, rate, sdesc in GOOGLE_RATES:
+                out = OUT / f"{vname}_{sname}.mp3"
+                try:
+                    secs = await make(f"{vname}_{sname}", voice, rate, "", out)
+                    lines.append(f"{out.name:34s} {voice}  hız {rate}  ({secs:.1f} sn)")
+                    print(f"tamam: {out.name} ({secs:.1f} sn)")
+                except Exception as e:
+                    lines.append(f"{out.name:34s} ÜRETİLEMEDİ: {e}")
+                    print(f"HATA: {out.name}: {e}", file=sys.stderr)
+            lines.append(f"    -> {vdesc}")
+            lines.append("")
+    else:
+        lines += ["(Google sesleri denenmedi: GOOGLE_TTS_API_KEY tanımlı değil.)", ""]
     lines += ["Ayarlar:"] + [f"  {s[0]}: {s[3]}" for s in SETTINGS]
     (OUT / "LISTE.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     for p in (OUT / "_tmp").glob("*"):
