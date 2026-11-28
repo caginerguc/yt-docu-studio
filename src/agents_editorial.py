@@ -187,6 +187,10 @@ _DUP_STOP = frozenset("""der die das den dem des ein eine einer eines einem eine
 bei mit nach von vom zum zur für über unter durch sich nicht nur noch schon dann wird wurde wurden sind ist war waren
 hat hatte haben diese dieser dieses diesem diesen sein seine seiner ihre ihrer the and of to in on for with from that
 this was were are is has had have bir ve ile bu bunu için olarak gibi daha çok""".split())
+ACT_MIN_SHARE = 0.8        # bölüm taslağı, kelime bütçesinin en az %80'i olmalı; değilse uzatılması istenir
+ACT_LENGTH_RETRIES = 2     # kısa taslak için en fazla ek deneme (eleştirmen sonrası yeniden yazımda 1)
+TOTAL_MIN_SHARE = 0.85     # senaryonun tamamı hedefin %85'inin altındaysa en kısa bölümler uzatılır
+MAX_EXTEND_ACTS = 2
 DUP_OVERLAP = 0.6          # küçük cümlenin içerik köklerinin en az %60'ı öncekiyle aynıysa tekrar sayılır
 _YEAR = config.now_local().year
 # Kalıcı içerik: başlık/kapak/açıklamada güncel yıl ve "şimdi"ye bağlı ifadeler yasak
@@ -376,8 +380,34 @@ LAST SENTENCES OF THE PREVIOUS ACT (continue smoothly, do not recap): {tail or '
 {('REVIEWER FEEDBACK TO FIX:' + chr(10) + feedback) if feedback else ''}{prior}
 
 Return the sentences of this act only."""
-        draft = self.llm.generate_json(prompt, ActDraft, system=self.system, temperature=0.75,
-                                       validate=None, label=f"act{act_cfg['id']}")
+        # Uzunluk denetimi: kısa taslak en fazla 1-2 kez uzatılarak yeniden istenir; en uzun taslak kullanılır.
+        # (İş hiçbir zaman bu yüzden durmaz; ikinci denemeler başarısız olursa eldeki en iyi taslakla sürer.)
+        min_words = int(budget * ACT_MIN_SHARE)
+        retries = 1 if previous else ACT_LENGTH_RETRIES
+        draft, best_words, ask = None, -1, prompt
+        for attempt in range(retries + 1):
+            try:
+                got = self.llm.generate_json(ask, ActDraft, system=self.system, temperature=0.75,
+                                             validate=None, label=f"act{act_cfg['id']}")
+            except LLMError:
+                if draft is None:
+                    raise
+                log.warning("[act%d] uzatma denemesi başarısız, eldeki taslakla devam.", act_cfg["id"])
+                break
+            words = sum(len(x.text.split()) for x in got.sentences)
+            if words > best_words:
+                draft, best_words = got, words
+            if best_words >= min_words or attempt == retries:
+                break
+            log.warning("[act%d] taslak kısa: %d kelime (en az %d, hedef %d); uzatılması isteniyor (%d/%d).",
+                        act_cfg["id"], words, min_words, budget, attempt + 1, retries)
+            ask = (f"{prompt}\n\nYOUR PREVIOUS ANSWER WAS TOO SHORT: {words} words, but this act needs at least "
+                   f"{int(budget * 0.9)} words (about {round(budget * 0.9 / 15)} sentences). Write the WHOLE act again: "
+                   "keep its strongest sentences and add documented detail from FACTS and RESERVE FACTS (names, places, "
+                   "dates, figures, consequences, the human side). No filler, no repetition, no recap.\n"
+                   "PREVIOUS TOO-SHORT ANSWER:\n" + "\n".join(x.text for x in got.sentences))
+        if best_words < min_words:
+            log.warning("[act%d] taslak hedefin altında kaldı: %d kelime (hedef %d).", act_cfg["id"], best_words, budget)
         return [PlanSentence(id="", act_id=act_cfg["id"], text=clean_sentence(x.text), evidence=x.evidence,
                              fact_ids=x.fact_ids, pause_before=x.pause_before) for x in draft.sentences]
 
@@ -753,6 +783,42 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
             o.thumbnail_prompt_en += ", no text, no watermark"
         return o
 
+    # -- 2b. uzunluk ---------------------------------------------------------- #
+    def ensure_length(self, acts: list[PlanAct], d: Dossier, arc_by_id: dict, target: int, variant: str) -> None:
+        """Senaryo hedefin çok altındaysa bütçesine göre en kısa kalan bölümleri (en fazla 2) uzatarak yeniden yazar.
+        Doğrulama (fact-check) bundan sonra çalıştığı için eklenen cümleler de denetlenir."""
+        total = sum(len(s.text.split()) for a in acts for s in a.sentences)
+        if total >= target * TOTAL_MIN_SHARE:
+            return
+        log.warning("Senaryo kısa: %d kelime (hedef %d, en az %d); en kısa bölümler uzatılıyor.", total, target,
+                    int(target * TOTAL_MIN_SHARE))
+        budgets = {c["id"]: round(target * c["share"]) for c in config.ACTS}
+
+        def deficit(a: PlanAct) -> float:
+            return 1 - sum(len(s.text.split()) for s in a.sentences) / max(1, budgets[a.act_id])
+
+        for act in sorted(acts, key=deficit, reverse=True)[:MAX_EXTEND_ACTS]:
+            if deficit(act) <= 1 - ACT_MIN_SHARE:
+                continue
+            words = sum(len(s.text.split()) for s in act.sentences)
+            cfg = next(c for c in config.ACTS if c["id"] == act.act_id)
+            idx = acts.index(act)
+            prior_used = {f for a in acts if a.act_id < act.act_id for s in a.sentences for f in s.fact_ids}
+            tail_prev = " ".join(s.text for s in acts[idx - 1].sentences[-3:]) if idx else ""
+            fb = (f"- This act has only {words} words but needs about {budgets[act.act_id]}. Extend it with documented "
+                  "detail (facts and reserve facts) while keeping its strongest sentences and its ending question.")
+            try:
+                new = self.write_act(cfg, arc_by_id[act.act_id], d, budgets[act.act_id], tail_prev, prior_used,
+                                     variant, feedback=fb, previous=act.sentences)
+            except LLMError as e:
+                log.warning("Bölüm %d uzatılamadı, eski hali kalıyor: %s", act.act_id, e)
+                continue
+            if sum(len(s.text.split()) for s in new) > words:
+                act.sentences = new
+                renumber(acts)
+        log.info("Uzunluk düzeltmesi sonrası: %d kelime (hedef %d).",
+                 sum(len(s.text.split()) for a in acts for s in a.sentences), target)
+
     # -- ana akış -------------------------------------------------------------- #
     def produce(self, d: Dossier) -> ProductionPlan:
         cand = d.candidate
@@ -809,6 +875,7 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         if best is not None:   # en yüksek puanlı sürüm kalır; yeniden yazım kötüleştirdiyse eskisine dönülür
             log.info("Kullanılan senaryo sürümü: genel puan %d", best[0])
             acts, scores = best[1], best[2]
+        self.ensure_length(acts, d, arc_by_id, target, variant)
 
         stats = self.fact_check(acts, d)
         repeats = drop_repeated_sentences(acts)
