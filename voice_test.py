@@ -45,7 +45,9 @@ GOOGLE_VOICES = [
     ("7_Google_Orus", "de-DE-Chirp3-HD-Orus", "Google Chirp 3 HD: kararlı erkek ses"),
     ("8_Google_Sadaltager", "de-DE-Chirp3-HD-Sadaltager", "Google Chirp 3 HD: bilgili erkek ses"),
 ]
-GOOGLE_RATES = [("a_094", 0.94, "%6 yavaş (botun ayarı)"), ("b_088", 0.88, "%12 yavaş, daha ağır")]
+GOOGLE_RATES = [("a_094", 0.94, "%6 yavaş"), ("b_088", 0.88, "%12 yavaş, daha ağır")]
+# Algenib, hız 0.94, ton düşürülmüş (yarım ton): botun ayarı -1.2
+ALGENIB_PITCH = [("9_Algenib_ton-1.0", -1.0), ("9_Algenib_ton-1.2_BOT", -1.2), ("9_Algenib_ton-1.5", -1.5)]
 # (ek, hız, ton, açıklama)
 SETTINGS = [
     ("a_mevcut", "-8%", "+0Hz", "botun şu anki ayarı (%8 yavaş)"),
@@ -104,13 +106,27 @@ def _write_mp3(pcm: np.ndarray, path: Path) -> None:
     wav.unlink()
 
 
-async def make(name: str, voice: str, rate: str, pitch: str, out: Path) -> float:
+def _pitch_shift(mp3: Path, semitones: float) -> None:
+    f = 2 ** (semitones / 12)
+    tmp = mp3.with_suffix(".p.mp3")
+    for af in (f"rubberband=pitch={f:.5f}", f"asetrate=24000*{f:.5f},aresample=24000,atempo={1 / f:.5f}"):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp3), "-af", af, "-ar", "24000", str(tmp)],
+                           stdin=subprocess.DEVNULL, capture_output=True)
+        if r.returncode == 0:
+            tmp.replace(mp3)
+            return
+    raise RuntimeError("ton düşürülemedi")
+
+
+async def make(name: str, voice: str, rate: str, pitch: str, out: Path, semitones: float = 0.0) -> float:
     tmp = OUT / "_tmp"
     tmp.mkdir(parents=True, exist_ok=True)
     parts: list[np.ndarray] = []
     for i, sentence in enumerate(TEXT):
         mp3 = tmp / f"{name}_{i}.mp3"
         await _tts(sentence, voice, rate, pitch, mp3)
+        if semitones:
+            _pitch_shift(mp3, semitones)
         if i:
             gap = QUESTION_GAP_S if sentence.rstrip().endswith("?") else GAP_S
             parts.append(np.zeros(int(gap * SR), np.int16))
@@ -150,6 +166,17 @@ async def main() -> int:
                     print(f"HATA: {out.name}: {e}", file=sys.stderr)
             lines.append(f"    -> {vdesc}")
             lines.append("")
+        for name, semi in ALGENIB_PITCH:
+            out = OUT / f"{name}.mp3"
+            try:
+                secs = await make(name, "de-DE-Chirp3-HD-Algenib", 0.94, "", out, semitones=semi)
+                lines.append(f"{out.name:34s} Algenib  hız 0.94, ton {semi:+.1f} yarım ton  ({secs:.1f} sn)")
+                print(f"tamam: {out.name} ({secs:.1f} sn)")
+            except Exception as e:
+                lines.append(f"{out.name:34s} ÜRETİLEMEDİ: {e}")
+                print(f"HATA: {out.name}: {e}", file=sys.stderr)
+        lines.append("    -> Algenib, biraz kalınlaştırılmış (_BOT = botun kullanacağı ayar)")
+        lines.append("")
     else:
         lines += ["(Google sesleri denenmedi: GOOGLE_TTS_API_KEY tanımlı değil.)", ""]
     lines += ["Ayarlar:"] + [f"  {s[0]}: {s[3]}" for s in SETTINGS]
