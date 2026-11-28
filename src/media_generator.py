@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import unicodedata
@@ -57,6 +58,27 @@ GOOGLE_LOCALES = {"de": "de-DE", "en": "en-US", "tr": "tr-TR"}
 
 class GoogleTTSError(RuntimeError):
     pass
+
+
+def pitch_shift(path: Path, semitones: float) -> bool:
+    """Sesi süresini değiştirmeden yarım ton kadar kalınlaştırır/inceltir (önce rubberband, olmazsa
+    asetrate+atempo). Başarılıysa dosyanın yerine yazar."""
+    if not semitones:
+        return True
+    f = 2 ** (semitones / 12)
+    tmp = path.with_suffix(".pitch.mp3")
+    for af in (f"rubberband=pitch={f:.5f}", f"asetrate=24000*{f:.5f},aresample=24000,atempo={1 / f:.5f}"):
+        try:
+            r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(path), "-af", af, "-ar", "24000",
+                                "-b:a", "128k", str(tmp)], stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 2000:
+            tmp.replace(path)
+            return True
+    tmp.unlink(missing_ok=True)
+    return False
 FETCH_WORKERS = 4
 MAX_REUSE_PER_SOURCE = 3        # eksik kesit doldururken aynı görüntü en fazla bu kadar tekrar
 AI_BUDGET_S = float(os.environ.get("AI_BUDGET_S", "1800"))          # AI görsellere toplam en fazla 30 dk
@@ -796,6 +818,9 @@ class MediaGenerator:
                 if len(data) > 2000:
                     tmp = out.with_suffix(".part.mp3")
                     tmp.write_bytes(data)
+                    if self._pitch and not pitch_shift(tmp, self._pitch):
+                        tmp.unlink(missing_ok=True)
+                        raise GoogleTTSError(f"{sid}: ses tonu ayarlanamadı")
                     tmp.replace(out)
                     return
                 last = "boş ses"
@@ -814,7 +839,15 @@ class MediaGenerator:
     def _google_all(self) -> None:
         audio_cfg = {"audioEncoding": "MP3", "sampleRateHertz": 24000, "speakingRate": config.GOOGLE_TTS_RATE}
         sents = self.plan.sentences()
-        self._google_tts_one(sents[0].id, sents[0].text, audio_cfg)      # ilk cümle: anahtar/ses/hız ayarını sına
+        self._pitch = config.GOOGLE_TTS_PITCH
+        try:                                                # ilk cümle: anahtar/ses/hız/ton ayarını sına
+            self._google_tts_one(sents[0].id, sents[0].text, audio_cfg)
+        except GoogleTTSError as e:
+            if not self._pitch or "ton" not in str(e):
+                raise
+            log.warning("Ses tonu ayarlanamadı (FFmpeg); anlatım tonu değiştirilmeden üretilecek.")
+            self._pitch = 0.0                               # tüm cümleler aynı (değiştirilmemiş) tonda olsun
+            self._google_tts_one(sents[0].id, sents[0].text, audio_cfg)
         with ThreadPoolExecutor(max_workers=TTS_CONCURRENCY) as ex:
             list(ex.map(lambda s: self._google_tts_one(s.id, s.text, audio_cfg), sents[1:]))
 
@@ -827,14 +860,16 @@ class MediaGenerator:
         n = len(self.plan.sentences())
         t0 = time.monotonic()
         marker = config.AUDIO_DIR / ".voice"
-        want = self.google_voice() if config.GOOGLE_TTS_API_KEY else self.lang.voices[0]
+        want = (f"{self.google_voice()}|hız={config.GOOGLE_TTS_RATE}|ton={config.GOOGLE_TTS_PITCH}"
+                if config.GOOGLE_TTS_API_KEY else self.lang.voices[0])
         if not marker.exists() or marker.read_text(encoding="utf-8").strip() != want:
             self._clear_audio()                            # önbellekteki başka bir sesin dosyaları kullanılmasın
         if config.GOOGLE_TTS_API_KEY:
-            log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s (Google Chirp 3 HD), hız: %s",
-                     n, want, config.GOOGLE_TTS_RATE)
+            log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s (Google Chirp 3 HD), hız: %s, ton: %+.1f yarım ton",
+                     n, self.google_voice(), config.GOOGLE_TTS_RATE, config.GOOGLE_TTS_PITCH)
             try:
                 self._google_all()
+                want = f"{self.google_voice()}|hız={config.GOOGLE_TTS_RATE}|ton={self._pitch}"
                 marker.write_text(want, encoding="utf-8")
                 self.voice_used = want
                 log.info("Anlatım hazır (%.0f sn).", time.monotonic() - t0)

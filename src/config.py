@@ -88,8 +88,10 @@ CF_API_TOKEN = _env("CF_API_TOKEN")
 # Anlatıcı: Google Cloud Text-to-Speech, Chirp 3 HD sesleri. Anahtar yoksa ya da servis hata verirse
 # anlatımın tamamı ücretsiz Edge sesiyle (LangConfig.voices) üretilir.
 GOOGLE_TTS_API_KEY = _env("GOOGLE_TTS_API_KEY")
-GOOGLE_TTS_VOICE = _env("GOOGLE_TTS_VOICE", "Charon")             # tam ad: <dil>-Chirp3-HD-<ses>
+GOOGLE_TTS_VOICE = _env("GOOGLE_TTS_VOICE", "Algenib")            # tam ad: <dil>-Chirp3-HD-<ses>
 GOOGLE_TTS_RATE = float(_env("GOOGLE_TTS_RATE", "0.94"))           # 1.0 = normal hız
+# Sesi biraz kalınlaştırma (yarım ton; 0 = kapalı). Süre değişmez; -1.5'ten fazlası yapay duyulabilir.
+GOOGLE_TTS_PITCH = float(_env("GOOGLE_TTS_PITCH", "-1.2"))
 POLLINATIONS_API_KEY = _env("POLLINATIONS_API_KEY")     # opsiyonel (sk_...)
 WIKI_CONTACT = _env("WIKI_CONTACT")                     # Wikimedia User-Agent için e-posta/URL
 
