@@ -171,14 +171,25 @@ class YouTubeUploader:
         return pid
 
     def add_to_playlist(self, playlist_id: str, video_id: str) -> bool:
-        """Video listede yoksa ekler (tekrar eklemez)."""
+        """Video listede yoksa ekler (tekrar eklemez). Yeni oluşturulan liste birkaç saniye 'bulunamadı' (404)
+        görünebildiği için 404'te bekleyip tekrar dener."""
+        from googleapiclient.errors import HttpError
+
         yt = self._service()
-        have = yt.playlistItems().list(part="id", playlistId=playlist_id, videoId=video_id, maxResults=1).execute()
-        if have.get("items"):
-            return False
-        yt.playlistItems().insert(part="snippet", body={"snippet": {
-            "playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
-        return True
+        for attempt in range(5):
+            try:
+                have = yt.playlistItems().list(part="id", playlistId=playlist_id, videoId=video_id,
+                                               maxResults=1).execute()
+                if have.get("items"):
+                    return False
+                yt.playlistItems().insert(part="snippet", body={"snippet": {
+                    "playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
+                return True
+            except HttpError as e:
+                if e.resp.status != 404 or attempt == 4:
+                    raise
+                time.sleep(3 * (attempt + 1))                 # 3, 6, 9, 12 sn: liste sisteme yayılsın
+        return False
 
     def add_to_collection_playlist(self, video_id: str, collection_id: str | None) -> str | None:
         """Belgeseli koleksiyonunun oynatma listesine ekler. Hata belgeseli etkilemez (yalnız uyarı)."""

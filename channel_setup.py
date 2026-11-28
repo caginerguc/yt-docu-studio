@@ -127,16 +127,31 @@ def main() -> int:
                 made.append(col["name"])
         rep.add("ok", "Ana sayfa rafları", ("eklendi: " + ", ".join(made)) if made else "zaten düzenli")
     except Exception as e:
-        rep.add("warn", "Ana sayfa rafları API ile eklenemedi",
-                "YouTube Studio > Özelleştirme > Düzen bölümünden elle eklenebilir. Hata: " + str(e)[:200])
+        try:
+            secs = yt.channelSections().list(part="snippet", mine=True).execute().get("items", [])
+            kinds = ", ".join(s["snippet"].get("title") or s["snippet"]["type"] for s in secs)
+        except Exception:
+            kinds = "?"
+        rep.add("warn", "Ana sayfa rafları API ile eklenemedi (YouTube raf sınırı dolu)",
+                f"Mevcut raflar: {kinds}. YouTube Studio > Özelleştirme > Düzen bölümünden gereksizleri çıkarıp "
+                "oynatma listesi rafları eklenebilir. Hata: " + str(e)[:150])
 
     # 5) Abone ol filigranı
     try:
         if not WATERMARK.exists():
             raise FileNotFoundError(WATERMARK)
-        yt.watermarks().set(channelId=cid, body={"timing": {"type": "offsetFromStart", "offsetMs": 0},
-                                                 "position": {"type": "corner", "cornerPosition": "topRight"}},
-                            media_body=MediaFileUpload(str(WATERMARK), mimetype="image/png")).execute()
+        from googleapiclient.errors import HttpError
+
+        # Parça parça (resumable) yükleme: tek parça (multipart) gönderimde Python 3.11'in e-posta modülü PNG'yi
+        # yeniden kodlamaya çalışıp hata veriyordu. YouTube başarıda 204 döndürür; kütüphane bunu hata sanar.
+        try:
+            yt.watermarks().set(channelId=cid, body={"timing": {"type": "offsetFromStart", "offsetMs": 0},
+                                                     "position": {"type": "corner", "cornerPosition": "topRight"}},
+                                media_body=MediaFileUpload(str(WATERMARK), mimetype="image/png",
+                                                           resumable=True)).execute()
+        except HttpError as he:
+            if he.resp.status != 204:
+                raise
         rep.add("ok", "Abone ol filigranı ayarlandı (anahtar deliği simgesi, tüm video boyunca)")
     except Exception as e:
         rep.add("warn", "Filigran API ile ayarlanamadı",
