@@ -34,6 +34,27 @@ def _seconds(iso: str) -> int:
     return 0 if not m else int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
 
 
+def _set_watermark(creds, channel_id: str, png: Path) -> None:
+    """watermarks.set: JSON ayarları + PNG tek bir multipart/related istekte, doğrudan HTTP ile."""
+    import json
+    import uuid
+
+    from google.auth.transport.requests import AuthorizedSession
+
+    meta = {"timing": {"type": "offsetFromStart", "offsetMs": 0},
+            "position": {"type": "corner", "cornerPosition": "topRight"}}
+    boundary = uuid.uuid4().hex
+    body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{json.dumps(meta)}\r\n--{boundary}\r\nContent-Type: image/png\r\n\r\n").encode() \
+        + png.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+    r = AuthorizedSession(creds).post(
+        "https://www.googleapis.com/upload/youtube/v3/watermarks/set",
+        params={"channelId": channel_id, "uploadType": "multipart"}, data=body,
+        headers={"Content-Type": f"multipart/related; boundary={boundary}"}, timeout=60)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+
+
 def main() -> int:
     config.setup_logging()
     rep = Report()
@@ -42,7 +63,6 @@ def main() -> int:
         print(rep.text())
         return 1
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
 
     yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
     up = YouTubeUploader()
@@ -107,13 +127,22 @@ def main() -> int:
         except Exception as e:
             rep.add("error", f"Oynatma listesi oluşturulamadı: {col['playlist']}", str(e)[:300])
 
-    # 4) Ana sayfa rafları
+    # 4) Ana sayfa rafları (YouTube türleri küçük harfle döndürüyor: 'recentuploads')
     try:
         existing = yt.channelSections().list(part="snippet,contentDetails", mine=True).execute().get("items", [])
-        have_types = {s["snippet"]["type"] for s in existing}
+        # Önceki bir çalıştırmanın eklediği mükerrer "en yeni videolar" rafını kaldır (ilki kalır)
+        recents = [s for s in existing if s["snippet"]["type"].lower() == "recentuploads"]
+        removed = 0
+        for s in recents[1:]:
+            yt.channelSections().delete(id=s["id"]).execute()
+            removed += 1
+        if removed:
+            rep.add("ok", f"Mükerrer 'en yeni videolar' rafı kaldırıldı ({removed})")
+            existing = [s for s in existing if s not in recents[1:]]
+        have_types = {s["snippet"]["type"].lower() for s in existing}
         have_pls = {p for s in existing for p in (s.get("contentDetails", {}).get("playlists") or [])}
         pos, made = len(existing), []
-        if "recentUploads" not in have_types:
+        if "recentuploads" not in have_types:
             yt.channelSections().insert(part="snippet", body={"snippet": {"type": "recentUploads",
                                                                          "position": 0}}).execute()
             made.append("En yeni videolar")
@@ -127,36 +156,21 @@ def main() -> int:
                 made.append(col["name"])
         rep.add("ok", "Ana sayfa rafları", ("eklendi: " + ", ".join(made)) if made else "zaten düzenli")
     except Exception as e:
-        try:
-            secs = yt.channelSections().list(part="snippet", mine=True).execute().get("items", [])
-            kinds = ", ".join(s["snippet"].get("title") or s["snippet"]["type"] for s in secs)
-        except Exception:
-            kinds = "?"
-        rep.add("warn", "Ana sayfa rafları API ile eklenemedi (YouTube raf sınırı dolu)",
-                f"Mevcut raflar: {kinds}. YouTube Studio > Özelleştirme > Düzen bölümünden gereksizleri çıkarıp "
-                "oynatma listesi rafları eklenebilir. Hata: " + str(e)[:150])
+        rep.add("warn", "Ana sayfa rafları API ile tamamlanamadı (YouTube raf sınırı dolu olabilir)",
+                "YouTube Studio > Özelleştirme > Düzen bölümünden oynatma listesi rafları elle eklenebilir. "
+                "Hata: " + str(e)[:150])
 
-    # 5) Abone ol filigranı
+    # 5) Abone ol filigranı: Google istemci kütüphanesi (httplib2 0.32) bu istekte 'range() arg 3 must not be
+    # zero' hatası verdiği için istek doğrudan (requests + yetkili oturum) multipart olarak gönderilir.
     try:
         if not WATERMARK.exists():
             raise FileNotFoundError(WATERMARK)
-        from googleapiclient.errors import HttpError
-
-        # Parça parça (resumable) yükleme: tek parça (multipart) gönderimde Python 3.11'in e-posta modülü PNG'yi
-        # yeniden kodlamaya çalışıp hata veriyordu. YouTube başarıda 204 döndürür; kütüphane bunu hata sanar.
-        try:
-            yt.watermarks().set(channelId=cid, body={"timing": {"type": "offsetFromStart", "offsetMs": 0},
-                                                     "position": {"type": "corner", "cornerPosition": "topRight"}},
-                                media_body=MediaFileUpload(str(WATERMARK), mimetype="image/png",
-                                                           resumable=True)).execute()
-        except HttpError as he:
-            if he.resp.status != 204:
-                raise
+        _set_watermark(creds, cid, WATERMARK)
         rep.add("ok", "Abone ol filigranı ayarlandı (anahtar deliği simgesi, tüm video boyunca)")
     except Exception as e:
         rep.add("warn", "Filigran API ile ayarlanamadı",
                 "YouTube Studio > Özelleştirme > Marka > Video filigranı bölümünden assets/branding/"
-                "watermark_150.png yüklenebilir. Hata: " + str(e)[:200])
+                "watermark_150.png yüklenebilir. Hata: " + str(e)[:300])
 
     text = rep.text()
     print("\n=== Kanal Düzenleme Raporu ===\n" + text)
