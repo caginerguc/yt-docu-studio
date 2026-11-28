@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from src import config
 from src.plan import ProductionPlan, ShortPlan
-from src.video_renderer import (FPS, MUSIC_LUFS, SR, VideoRenderer, X264, _run, probe_duration,
+from src.video_renderer import (FPS, MUSIC_LUFS, SR, RenderError, VideoRenderer, X264, _run, probe_duration,
                                 split_words)
 
 log = logging.getLogger("makrokontext.short")
@@ -32,6 +36,9 @@ CAP_WORDS = 4                   # altyazı parçası başına en fazla kelime
 CUT_TIMEOUT_S = 180             # tek kesit/birleştirme için FFmpeg süre sınırı
 COMPOSE_TIMEOUT_S = 900         # dikey kurgu için FFmpeg süre sınırı (takılırsa Short atlanır, iş sürer)
 LEAD_S, TAIL_S = 0.12, 0.25     # cümle sesinin öncesinden/sonrasından alınan pay
+MUSIC_OFFSET_S = 12.0           # müziğe sessiz girişi atlayarak başla
+MAX_SILENCE_S = 1.2             # ses kontrolü: kapanış kartından önce bundan uzun tam sessizlik = hata
+SILENCE_DB = -55.0
 FONT = "DejaVu Sans"            # Actions'ta fonts-dejavu-core ile kurulu; ▶ ve Ä/Ö/Ü/ß içerir
 
 _END_TEXT = {
@@ -116,40 +123,76 @@ class ShortRenderer:
         for tm in picked:
             a = max(tm.start, tm.speech_start - LEAD_S)
             b = min(tm.end + TAIL_S, self.r.duration)
+            b = a + max(1, round((b - a) * FPS)) / FPS          # kare ızgarası: görüntü = ses uzunluğu
             segs.append(Segment(tm.sentence.id, tm.sentence.text, a, b, t + (tm.speech_start - a), t + (tm.end - a)))
             t += b - a
         return segs
 
     # ------------------------------------------------------------------ #
     def _cut(self, segs: list[Segment]) -> tuple[Path, Path]:
-        """Her cümleyi ayrı, basit bir FFmpeg çağrısıyla keser (girişte arama) ve parçaları kopyalayarak birleştirir.
-        Aynı girdiyi tek komutta birden çok trim dalıyla okumak FFmpeg 7+ zamanlayıcısında kilitlenebiliyor
-        (cümleler belgesel sırasında değilse); bu yüzden kesitler tek tek alınır."""
+        """Görüntü: her cümle ayrı FFmpeg çağrısıyla (girişte arama) kesilip kopyalanarak birleştirilir.
+        Ses: anlatım WAV'ı Python'da örnek hassasiyetinde kesilir. (FFmpeg 8'de WAV'da '-ss' + afade, bazı
+        kesitlerin ilk saniyelerini sıfırladı; tek komutta ortak girdi ise FFmpeg 7+'da kilitlenebiliyor.)"""
         video_src = self.work / "video_only.mp4"
         narr_src = self.work / "narration.wav"
         for p in (video_src, narr_src):
             if not p.exists():
                 raise FileNotFoundError(f"Belgesel ara dosyası yok: {p.name} (önce belgesel render edilmeli)")
-        vparts, aparts = [], []
+        vparts = []
         for i, s in enumerate(segs):
-            d = s.end - s.start
-            v, a = self.work / f"short_seg{i}.mp4", self.work / f"short_seg{i}.wav"
+            v = self.work / f"short_seg{i}.mp4"
             _run(["ffmpeg", "-y", "-ss", f"{s.start:.3f}", "-i", str(video_src), "-frames:v",
-                  str(max(1, round(d * FPS))), "-an", *X264, str(v)], f"short kesit {i + 1} (görüntü)",
-                 timeout=CUT_TIMEOUT_S)
-            _run(["ffmpeg", "-y", "-ss", f"{s.start:.3f}", "-i", str(narr_src), "-t", f"{d:.3f}",
-                  "-af", f"afade=t=in:d=0.03,afade=t=out:st={max(0.0, d - 0.06):.3f}:d=0.06",
-                  "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(a)], f"short kesit {i + 1} (ses)",
-                 timeout=CUT_TIMEOUT_S)
+                  str(max(1, round((s.end - s.start) * FPS))), "-an", *X264, str(v)],
+                 f"short kesit {i + 1} (görüntü)", timeout=CUT_TIMEOUT_S)
             vparts.append(v)
-            aparts.append(a)
         v_out, a_out = self.work / "short_h.mp4", self.work / "short_narr.wav"
-        for parts, out, what in ((vparts, v_out, "görüntü"), (aparts, a_out, "ses")):
-            lst = self.work / f"short_{what}.txt"
-            lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
-            _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)],
-                 f"short birleştirme ({what})", timeout=CUT_TIMEOUT_S)
+        lst = self.work / "short_video.txt"
+        lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in vparts), encoding="utf-8")
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(v_out)],
+             "short birleştirme (görüntü)", timeout=CUT_TIMEOUT_S)
+        self._cut_audio(narr_src, segs, a_out)
         return v_out, a_out
+
+    @staticmethod
+    def _cut_audio(src: Path, segs: list[Segment], out: Path) -> None:
+        """Anlatımı örnek (sample) hassasiyetinde keser; her kesite 30/60 ms yumuşak giriş/çıkış."""
+        with wave.open(str(src), "rb") as w:
+            sr, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            if width != 2:
+                raise RenderError(f"Beklenmeyen anlatım biçimi: {width * 8} bit")
+            data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).reshape(-1, ch)
+        parts = []
+        for s in segs:
+            a = int(round(s.start * sr))
+            n = int(round((s.end - s.start) * sr))
+            x = data[a:a + n].astype(np.float32)
+            if len(x) < n:                                   # belgesel sonunu aşarsa sessizlikle tamamla
+                x = np.vstack([x, np.zeros((n - len(x), ch), np.float32)])
+            fi, fo = min(len(x), int(0.03 * sr)), min(len(x), int(0.06 * sr))
+            if fi:
+                x[:fi] *= np.linspace(0, 1, fi, dtype=np.float32)[:, None]
+            if fo:
+                x[-fo:] *= np.linspace(1, 0, fo, dtype=np.float32)[:, None]
+            parts.append(x)
+        pcm = np.clip(np.vstack(parts), -32768, 32767).astype(np.int16)
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(ch)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(pcm.tobytes())
+
+    def _music_bed(self, total: float) -> Path | None:
+        """Müzik yatağını ayrı ve basit bir adımda hazırlar (döngü ayarı yok; FFmpeg 8'de -stream_loop + -ss
+        müziği tamamen düşürmüştü)."""
+        if not self.r.music_paths:
+            return None
+        src = self.r.music_paths[0]
+        dur = probe_duration(src)
+        offset = MUSIC_OFFSET_S if dur > total + MUSIC_OFFSET_S + 1 else max(0.0, dur - total - 1)
+        bed = self.work / "short_music.wav"
+        _run(["ffmpeg", "-y", "-ss", f"{offset:.2f}", "-i", str(src), "-t", f"{total + 0.5:.3f}", "-vn",
+              "-ac", "2", "-ar", str(SR), "-c:a", "pcm_s16le", str(bed)], "short müzik", timeout=CUT_TIMEOUT_S)
+        return bed
 
     # ------------------------------------------------------------------ #
     def _ass(self, segs: list[Segment], total: float) -> Path:
@@ -200,10 +243,10 @@ class ShortRenderer:
     # ------------------------------------------------------------------ #
     def _compose(self, v_in: Path, a_in: Path, ass: Path, total: float) -> None:
         end_at = total - END_CARD_S
-        music = self.r.music_paths[0] if self.r.music_paths else None
+        music = self._music_bed(total)
         inputs = ["-i", str(v_in), "-i", str(a_in)]
         if music:
-            inputs += ["-stream_loop", "-1", "-ss", "12", "-i", str(music)]
+            inputs += ["-i", str(music)]
         fc = [
             f"[0:v]tpad=stop_mode=clone:stop_duration={END_CARD_S},split=2[b][f]",
             f"[b]scale=-2:{SH},crop={SW}:{SH},gblur=sigma=40,eq=brightness=-0.12:saturation=0.7[bg]",
@@ -213,18 +256,45 @@ class ShortRenderer:
         ]
         norm = f"aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo"
         if music:
-            fc += [f"[1:a]apad=pad_dur={END_CARD_S},{norm},asplit=2[voice][key]",
-                   f"[2:a]{norm},atrim=0:{total:.3f},loudnorm=I={MUSIC_LUFS + 2}:TP=-8:LRA=14,aresample={SR},"
+            fc += [f"[1:a]asetpts=PTS-STARTPTS,apad=pad_dur={END_CARD_S},{norm},asplit=2[voice][key]",
+                   f"[2:a]asetpts=PTS-STARTPTS,{norm},apad=whole_dur={total:.3f},atrim=0:{total:.3f},loudnorm=I={MUSIC_LUFS + 2}:TP=-8:LRA=14,aresample={SR},"
                    f"afade=t=in:d=0.6,afade=t=out:st={max(0.0, total - 1.6):.3f}:d=1.6[bed]",
                    "[bed][key]sidechaincompress=threshold=0.015:ratio=6:attack=40:release=700:makeup=1[duck]",
                    "[voice][duck]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[a]"]
         else:
-            fc.append(f"[1:a]apad=pad_dur={END_CARD_S},{norm},loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+            fc.append(f"[1:a]asetpts=PTS-STARTPTS,apad=pad_dur={END_CARD_S},{norm},loudnorm=I=-14:TP=-1.5:LRA=11[a]")
         tmp = self.out.with_suffix(".part.mp4")
         _run(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]",
               "-t", f"{total:.3f}", *X264, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
               str(tmp.resolve())], "short kurgu", cwd=self.work, timeout=COMPOSE_TIMEOUT_S)
         tmp.replace(self.out)
+        self.has_music = music is not None
+
+    # ------------------------------------------------------------------ #
+    def check_audio(self, total: float) -> dict:
+        """Yüklemeden önce son kontrol: kapanış kartından önce uzun tam sessizlik yok, müzik varsa duyuluyor."""
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(self.out), "-ac", "1", "-ar", "8000", "-f", "s16le",
+                              "-"], stdin=subprocess.DEVNULL, capture_output=True, timeout=120).stdout
+        x = np.frombuffer(raw, np.int16).astype(np.float32) / 32768
+        win = 400                                             # 50 ms
+        n = len(x) // win
+        if n == 0:
+            raise RenderError("Short'ta ses akışı yok.")
+        db = 20 * np.log10(np.sqrt((x[:n * win].reshape(n, win) ** 2).mean(1)) + 1e-9)
+        t = np.arange(n) * 0.05
+        end_at = total - END_CARD_S
+        quiet = (db < SILENCE_DB) & (t > 0.3) & (t < end_at - 0.2)
+        longest, run = 0.0, 0.0
+        for q in quiet:
+            run = run + 0.05 if q else 0.0
+            longest = max(longest, run)
+        if longest > MAX_SILENCE_S:
+            raise RenderError(f"Short ses kontrolü: {longest:.1f} sn tam sessizlik var (anlatım kesilmiş).")
+        card = db[(t > end_at + 0.4) & (t < total - 0.6)]
+        card_db = float(np.median(card)) if len(card) else -120.0
+        if getattr(self, "has_music", False) and card_db < SILENCE_DB:
+            raise RenderError(f"Short ses kontrolü: kapanış kartında müzik yok ({card_db:.0f} dB).")
+        return {"longest_silence_s": round(longest, 2), "end_card_db": round(card_db, 1)}
 
     # ------------------------------------------------------------------ #
     def render(self) -> Path | None:
@@ -236,9 +306,10 @@ class ShortRenderer:
         total = probe_duration(a_in) + END_CARD_S
         ass = self._ass(segs, total)
         self._compose(v_in, a_in, ass, total)
+        audio = self.check_audio(total)                        # sorun varsa RenderError -> Short yüklenmez
         real = probe_duration(self.out)
         meta = {"duration_s": round(real, 2), "sentences": [s.sid for s in segs], "hook_text": self.short.hook_text,
-                "title": self.short.title, "fps": FPS, "size": f"{SW}x{SH}"}
+                "title": self.short.title, "fps": FPS, "size": f"{SW}x{SH}", "audio_check": audio}
         (config.OUTPUT_DIR / "short.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                                       encoding="utf-8")
         log.info("Short hazır: %s (%.1f sn, %d cümle)", self.out.name, real, len(segs))
