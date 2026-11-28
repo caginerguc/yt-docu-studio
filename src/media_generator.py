@@ -19,6 +19,7 @@ Kullanılan dış kaynaklar output/credits.json dosyasına yazılır (açıklama
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -50,6 +51,12 @@ MIN_IMAGE_WIDTH = 900           # bundan küçük arşiv görseli 1080p'de bulan
 STOCK_MIN_W, STOCK_MAX_W = 1280, 1920
 STOCK_MIN_SECONDS = 4
 TTS_CONCURRENCY = 4
+GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+GOOGLE_LOCALES = {"de": "de-DE", "en": "en-US", "tr": "tr-TR"}
+
+
+class GoogleTTSError(RuntimeError):
+    pass
 FETCH_WORKERS = 4
 MAX_REUSE_PER_SOURCE = 3        # eksik kesit doldururken aynı görüntü en fazla bu kadar tekrar
 AI_BUDGET_S = float(os.environ.get("AI_BUDGET_S", "1800"))          # AI görsellere toplam en fazla 30 dk
@@ -764,11 +771,82 @@ class MediaGenerator:
         sem = asyncio.Semaphore(TTS_CONCURRENCY)
         await asyncio.gather(*(self._tts_one(sem, s.id, s.text) for s in self.plan.sentences()))
 
+    # ---- Google Cloud Text-to-Speech (Chirp 3 HD) ------------------------- #
+    def google_voice(self) -> str:
+        loc = GOOGLE_LOCALES.get(self.lang.code, f"{self.lang.code}-{self.lang.code.upper()}")
+        return f"{loc}-Chirp3-HD-{config.GOOGLE_TTS_VOICE}"
+
+    def _google_tts_one(self, sid: str, text: str, audio_cfg: dict) -> None:
+        out = self.audio_path(sid)
+        if out.exists() and out.stat().st_size > 2000:
+            return
+        voice = self.google_voice()
+        body = {"input": {"text": text}, "voice": {"languageCode": voice.rsplit("-Chirp3", 1)[0], "name": voice},
+                "audioConfig": audio_cfg}
+        last = ""
+        for attempt in range(config.TTS_RETRIES + 1):
+            try:
+                r = requests.post(GOOGLE_TTS_URL, params={"key": config.GOOGLE_TTS_API_KEY}, json=body, timeout=60)
+            except requests.RequestException as e:
+                last = f"bağlantı: {e}"
+                time.sleep(2 * (attempt + 1))
+                continue
+            if r.status_code == 200:
+                data = base64.b64decode(r.json().get("audioContent", ""))
+                if len(data) > 2000:
+                    tmp = out.with_suffix(".part.mp3")
+                    tmp.write_bytes(data)
+                    tmp.replace(out)
+                    return
+                last = "boş ses"
+                continue
+            last = f"HTTP {r.status_code}: {r.text[:300]}"
+            if r.status_code == 400 and "speakingRate" in audio_cfg and "rate" in r.text.lower():
+                audio_cfg.pop("speakingRate", None)       # ses hız ayarını desteklemiyorsa normal hızla dene
+                log.warning("Google TTS hız ayarını kabul etmedi; normal hızla devam ediliyor.")
+                continue
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(min(30, 3 * 2 ** attempt))
+                continue
+            break                                          # 400/401/403/404: tekrar denemek işe yaramaz
+        raise GoogleTTSError(f"{sid}: {last}")
+
+    def _google_all(self) -> None:
+        audio_cfg = {"audioEncoding": "MP3", "sampleRateHertz": 24000, "speakingRate": config.GOOGLE_TTS_RATE}
+        sents = self.plan.sentences()
+        self._google_tts_one(sents[0].id, sents[0].text, audio_cfg)      # ilk cümle: anahtar/ses/hız ayarını sına
+        with ThreadPoolExecutor(max_workers=TTS_CONCURRENCY) as ex:
+            list(ex.map(lambda s: self._google_tts_one(s.id, s.text, audio_cfg), sents[1:]))
+
+    def _clear_audio(self) -> None:
+        for s in self.plan.sentences():
+            self.audio_path(s.id).unlink(missing_ok=True)
+
     def generate_narration(self) -> None:
+        """Tek anlatıcı: Google (Chirp 3 HD) ya da Edge. Bir videoda iki ses asla karışmaz."""
         n = len(self.plan.sentences())
-        log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s, hız: %s", n, self.lang.voices[0], TTS_RATE)
         t0 = time.monotonic()
+        marker = config.AUDIO_DIR / ".voice"
+        want = self.google_voice() if config.GOOGLE_TTS_API_KEY else self.lang.voices[0]
+        if not marker.exists() or marker.read_text(encoding="utf-8").strip() != want:
+            self._clear_audio()                            # önbellekteki başka bir sesin dosyaları kullanılmasın
+        if config.GOOGLE_TTS_API_KEY:
+            log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s (Google Chirp 3 HD), hız: %s",
+                     n, want, config.GOOGLE_TTS_RATE)
+            try:
+                self._google_all()
+                marker.write_text(want, encoding="utf-8")
+                self.voice_used = want
+                log.info("Anlatım hazır (%.0f sn).", time.monotonic() - t0)
+                return
+            except Exception as e:
+                log.warning("Google TTS kullanılamadı, anlatımın tamamı Edge sesiyle (%s) üretilecek: %s",
+                            self.lang.voices[0], str(e)[:300])
+                self._clear_audio()
+        log.info("Anlatıcı sesi üretiliyor: %d cümle, ses: %s, hız: %s", n, self.lang.voices[0], TTS_RATE)
         asyncio.run(self._tts_all())
+        marker.write_text(self.lang.voices[0], encoding="utf-8")
+        self.voice_used = self.lang.voices[0]
         log.info("Anlatım hazır (%.0f sn).", time.monotonic() - t0)
 
     # ================================================================== #

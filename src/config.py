@@ -85,6 +85,11 @@ GEMINI_API_KEY = _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
 PEXELS_API_KEY = _env("PEXELS_API_KEY")                 # ücretsiz stok video/foto
 CF_ACCOUNT_ID = _env("CF_ACCOUNT_ID")                   # Cloudflare Workers AI (FLUX)
 CF_API_TOKEN = _env("CF_API_TOKEN")
+# Anlatıcı: Google Cloud Text-to-Speech, Chirp 3 HD sesleri. Anahtar yoksa ya da servis hata verirse
+# anlatımın tamamı ücretsiz Edge sesiyle (LangConfig.voices) üretilir.
+GOOGLE_TTS_API_KEY = _env("GOOGLE_TTS_API_KEY")
+GOOGLE_TTS_VOICE = _env("GOOGLE_TTS_VOICE", "Charon")             # tam ad: <dil>-Chirp3-HD-<ses>
+GOOGLE_TTS_RATE = float(_env("GOOGLE_TTS_RATE", "0.94"))           # 1.0 = normal hız
 POLLINATIONS_API_KEY = _env("POLLINATIONS_API_KEY")     # opsiyonel (sk_...)
 WIKI_CONTACT = _env("WIKI_CONTACT")                     # Wikimedia User-Agent için e-posta/URL
 

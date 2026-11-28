@@ -25,11 +25,12 @@ jobs:
           python-version: '3.11'
 
       - name: Bağımlılıklar
-        run: pip install "edge-tts>=6.1.12" numpy
+        run: pip install "edge-tts>=6.1.12" numpy requests
 
       - name: Sesleri üret
         env:
           PYTHONUNBUFFERED: '1'
+          GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
         run: python voice_test.py
 
       - name: Ses dosyaları (7 gün)
