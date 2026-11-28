@@ -195,6 +195,16 @@ _DATED = re.compile(rf"\b({_YEAR}|{_YEAR + 1}|aktuell\w*|derzeit|kürzlich|jetzt
 _NUM_TOKEN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
+def _narration_numbers(acts: list[PlanAct]) -> set[str]:
+    """Anlatımda geçen yıl ve sayılar (en az 3 hane): ambalaj yalnızca bunları kullanabilir."""
+    return numbers_in(" ".join(s.text for a in acts for s in a.sentences))
+
+
+def _unbacked_numbers(o: "SeoOut", acts: list[PlanAct]) -> list[str]:
+    """Başlık / kapak yazısı / kapak etiketinde geçip videoda hiç söylenmeyen yıl ve sayılar (abartı tıklama tuzağı)."""
+    return numbers_missing(f"{o.title} {o.thumbnail_text} {o.thumbnail_tag}", _narration_numbers(acts))
+
+
 def _content_stems(text: str) -> set[str]:
     out: set[str] = set()
     for w in re.findall(r"[^\W_][\w-]*", text.lower()):
@@ -663,14 +673,23 @@ pan for reveals). Alternate source types so no more than 2 consecutive shots sha
             dated = _DATED.search(f"{o.title} {o.thumbnail_text} {o.description_intro}")
             if dated:
                 errs.append(f"time-bound wording '{dated.group(0)}': the packaging must stay timeless")
+            invented = _unbacked_numbers(o, acts)
+            if invented:
+                errs.append(f"number(s) {', '.join(invented)} in title/thumbnail_text/thumbnail_tag do not occur in "
+                            "the narration: packaging may only use years and figures the video actually states")
             if errs:
                 raise ValueError("; ".join(errs))
 
-        opening = " ".join(a.sentences[0].text for a in acts if a.sentences)
+        narration = " ".join(s.text for a in acts for s in a.sentences)
         prompt = f"""You are the YouTube packaging editor. Output language: {self.lang.name}.
 TOPIC: {arc.working_title}
-OPENING LINES OF EACH ACT: {opening}
 TWIST FACT: {next((f.claim for f in d.facts if f.id == arc.twist_fact_id), '')}
+FULL NARRATION OF THE VIDEO (the packaging must be backed by this text):
+{narration[:16000]}
+
+PACKAGING TRUTH: viewers who click must get what title and thumbnail promise. Every event, claim, name, year and
+figure in title, thumbnail_text and thumbnail_tag must actually occur in the FULL NARRATION above, and the question
+the thumbnail raises must be answered in it. Sharpen and dramatise what is there; never add what is not.
 
 TASK
 - title: curiosity-driven but FULLY answerable inside the video; no false promise, no ALL-CAPS, no 'SCHOCK' bait;
@@ -720,6 +739,16 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         o.thumbnail_text = " ".join(words) or cut(arc.working_title.upper(), 20)
         if any(b in o.thumbnail_text.lower() for b in config.TOPIC_BLOCKLIST):
             o.thumbnail_text = cut(arc.working_title.upper(), 20)
+        # Kurallar tutmadığında (serbest üretim) videoda geçmeyen yıl/sayıyı ambalajdan çıkar
+        nums = _narration_numbers(acts)
+        if numbers_missing(o.title, nums):
+            log.warning("SEO: başlıkta videoda geçmeyen sayı var (%s), çalışma başlığı kullanılıyor", o.title)
+            o.title = cut(arc.working_title, 95)
+        if numbers_missing(o.thumbnail_text, nums):
+            o.thumbnail_text = cut(arc.working_title.upper(), 20)
+        if numbers_missing(o.thumbnail_tag, nums):
+            log.warning("SEO: kapak etiketi videoda geçmeyen sayı içeriyor (%s), etiket kaldırıldı", o.thumbnail_tag)
+            o.thumbnail_tag = ""
         if "no text" not in o.thumbnail_prompt_en.lower():
             o.thumbnail_prompt_en += ", no text, no watermark"
         return o
