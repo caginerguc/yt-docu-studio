@@ -27,11 +27,13 @@ log = logging.getLogger("makrokontext.thumbnail")
 
 W, H = config.THUMB_W, config.THUMB_H
 
+BRAND_RED = (196, 18, 28)                                # kanal kırmızısı (banner/profil ile uyumlu)
 PALETTES = (
-    {"fill": (255, 230, 0),   "accent": (225, 6, 0),    "tint": (255, 150, 40)},   # sarı / kırmızı
-    {"fill": (255, 255, 255), "accent": (255, 59, 31),  "tint": (90, 160, 255)},   # beyaz / turuncu-kırmızı
-    {"fill": (0, 229, 255),   "accent": (255, 230, 0),  "tint": (0, 200, 200)},    # camgöbeği / sarı
+    {"fill": (255, 214, 0),   "accent": BRAND_RED, "tint": (255, 150, 40)},    # sarı + kırmızı kutu (yüklenen)
+    {"fill": (255, 255, 255), "accent": BRAND_RED, "tint": (255, 170, 90)},    # beyaz + kırmızı kutu
+    {"fill": (240, 228, 200), "accent": BRAND_RED, "tint": (230, 180, 120)},   # kağıt beji + kırmızı kutu
 )
+ZOOM = 1.12            # nesneyi büyütmek için odak noktasına doğru hafif yakınlaştırma
 # (odak x, odak y, yerleşim, max metin genişliği oranı, max metin yüksekliği oranı)
 LAYOUTS = (
     (0.64, 0.40, "left",   0.62, 0.50),
@@ -57,7 +59,7 @@ def load_font(size: int, path: Path | None = None) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size=size)
 
 
-def sanitize_headline(text: str, max_words: int = 4, max_chars: int = 30) -> str:
+def sanitize_headline(text: str, max_words: int = 3, max_chars: int = 20) -> str:
     """'VERBOTENE AKTE: Was das FBI ...' -> 'VERBOTENE AKTE' (ilk 2-4 kelime, büyük harf)."""
     head = text.split(":")[0]
     head = re.sub(r"[^\w\s?!.\-ÄÖÜäöüß]", "", head, flags=re.UNICODE)
@@ -71,7 +73,7 @@ def sanitize_headline(text: str, max_words: int = 4, max_chars: int = 30) -> str
 
 def _cover_resize(img: Image.Image, focus: tuple[float, float]) -> Image.Image:
     img = img.convert("RGB")
-    scale = max(W / img.width, H / img.height)
+    scale = max(W / img.width, H / img.height) * ZOOM
     nw, nh = max(W, round(img.width * scale)), max(H, round(img.height * scale))
     img = img.resize((nw, nh), Image.Resampling.LANCZOS)
     left = int(min(max(focus[0] * nw - W / 2, 0), nw - W))
@@ -103,14 +105,14 @@ def _process_base(img: Image.Image, palette: dict, focus: tuple[float, float], l
     img = ImageOps.autocontrast(img, cutoff=1)
     img = ImageEnhance.Contrast(img).enhance(1.25)
     img = ImageEnhance.Color(img).enhance(1.10)
-    img = ImageEnhance.Brightness(img).enhance(0.92)
+    img = ImageEnhance.Brightness(img).enhance(1.0)
     arr = np.asarray(img, dtype=np.float32)
 
     # split-toning: gölgeler soğuk lacivert, vurgular palet tonu
     lum = arr.mean(axis=2, keepdims=True) / 255.0
     shadow = np.array([10, 16, 38], dtype=np.float32)
     tint = np.array(palette["tint"], dtype=np.float32)
-    arr = arr * (1 - 0.20 * (1 - lum)) + shadow * 0.20 * (1 - lum)
+    arr = arr * (1 - 0.12 * (1 - lum)) + shadow * 0.12 * (1 - lum)
     arr = arr + (tint - 128.0) * 0.10 * lum
 
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -119,16 +121,16 @@ def _process_base(img: Image.Image, palette: dict, focus: tuple[float, float], l
     # odak noktasına spot ışık
     sigma = 0.28 * W
     spot = np.exp(-(((xx - fx) ** 2) + ((yy - fy) ** 2)) / (2 * sigma**2))[..., None]
-    arr = arr + spot * (tint * 0.22)
+    arr = arr * (1 + 0.30 * spot) + spot * (tint * 0.15)          # nesneyi aydınlat (pozlama + sıcak ışık)
 
     # vignette
     r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
-    vig = 1 - 0.55 * np.clip((r - 0.45) / 0.9, 0, 1) ** 1.6
+    vig = 1 - 0.35 * np.clip((r - 0.5) / 0.9, 0, 1) ** 1.6
     arr = arr * vig[..., None]
 
     # metin okunurluğu: alttan ve (sol yerleşimde) soldan gradyan
     ramp = np.clip((yy - H * 0.40) / (H * 0.60), 0, 1) ** 1.4
-    dark = 0.78 * ramp
+    dark = 0.70 * ramp
     if layout == "left":
         dark = np.maximum(dark, 0.55 * np.clip(1 - xx / (W * 0.62), 0, 1) ** 1.3)
     arr = arr * (1 - dark[..., None])
@@ -141,6 +143,7 @@ def _grain_and_sharpen(img: Image.Image, seed: int) -> Image.Image:
     arr = np.asarray(img.convert("RGB"), dtype=np.float32)
     arr = arr + rng.normal(0, 4.5, (H, W, 1)).astype(np.float32)
     out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    out = out.filter(ImageFilter.UnsharpMask(radius=10, percent=35, threshold=2))   # netlik: nesne öne çıkar
     return out.filter(ImageFilter.UnsharpMask(radius=1.2, percent=60, threshold=3))
 
 
@@ -202,12 +205,22 @@ def _draw_block(draw, lines, font, sw, cap_h, pitch, x0, y0, align, block_w, col
         words = line.split(" ")
         for j, word in enumerate(words):
             is_accent = (i == last_line and j == len(words) - 1 and len(lines) + len(words) > 2)
-            if shadow:
-                fill, stroke = (0, 0, 0, 235), (0, 0, 0, 235)
+            if is_accent and colors["use_accent"]:
+                # vurgu kelimesi: kanal kırmızısı kutu içinde beyaz yazı ("dosya damgası")
+                pad = max(8, int(cap_h * 0.16))
+                ww = draw.textlength(word, font=font)
+                box = [x - pad, base_y - cap_h - pad, x + ww + pad, base_y + pad]
+                if shadow:
+                    draw.rectangle(box, fill=(0, 0, 0, 235))
+                else:
+                    draw.rectangle(box, fill=colors["accent"])
+                    draw.text((x, base_y), word, font=font, fill=(255, 255, 255, 255), anchor="ls")
+            elif shadow:
+                draw.text((x, base_y), word, font=font, fill=(0, 0, 0, 235), stroke_width=sw,
+                          stroke_fill=(0, 0, 0, 235), anchor="ls")
             else:
-                fill = colors["accent"] if (is_accent and colors["use_accent"]) else colors["fill"]
-                stroke = (0, 0, 0, 255)
-            draw.text((x, base_y), word, font=font, fill=fill, stroke_width=sw, stroke_fill=stroke, anchor="ls")
+                draw.text((x, base_y), word, font=font, fill=colors["fill"], stroke_width=sw,
+                          stroke_fill=(0, 0, 0, 255), anchor="ls")
             x += draw.textlength(word + " ", font=font)
 
 
@@ -230,7 +243,7 @@ def build_thumbnail(
     canvas = _process_base(_cover_resize(img, (fx, fy)), palette, (fx, fy), layout)
 
     text = sanitize_headline(headline)
-    max_w, max_h = int(W * w_ratio), int(H * h_ratio)
+    max_w, max_h = int(W * w_ratio * 0.94), int(H * h_ratio)          # vurgu kutusunun payı
     lines, size, sw, cap_h, pitch = fit_headline(text, max_w, max_h, font_path)
     font = load_font(size, font_path)
 
@@ -244,7 +257,7 @@ def build_thumbnail(
         x0 = 52
         y0 = H - block_h - 64 if variant % 3 == 0 else int((H - block_h) / 2) + 30
 
-    colors = {"fill": palette["fill"] + (255,), "accent": palette["accent"] + (255,), "use_accent": variant % 2 == 0}
+    colors = {"fill": palette["fill"] + (255,), "accent": palette["accent"] + (255,), "use_accent": True}
 
     # gölge katmanı (bulanık), sonra ana metin
     shadow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -253,24 +266,16 @@ def build_thumbnail(
     canvas = Image.alpha_composite(canvas, shadow_layer.filter(ImageFilter.GaussianBlur(9)))
     draw = ImageDraw.Draw(canvas)
 
-    # vurgu çizgisi (sol yerleşim)
-    if layout == "left":
-        bar_y = y0 + block_h + 10
-        draw.rectangle([x0, bar_y, x0 + int(block_w * 0.55), bar_y + 12], fill=palette["accent"] + (255,))
-
     _draw_block(draw, lines, font, sw, cap_h, pitch, x0, y0, "left" if layout == "left" else "center", block_w, colors)
 
     # etiket bandı (üst sol)
     if tag:
-        tfont = load_font(34, font_path)
+        tfont = load_font(40, font_path)
         tag = tag.upper()
         tw = draw.textlength(tag, font=tfont)
-        draw.rectangle([44, 40, 44 + tw + 36, 96], fill=palette["accent"] + (245,))
-        draw.text((62, 68), tag, font=tfont, fill=(255, 255, 255, 255), anchor="lm")
-
-    # marka damgası: sağ üst (sağ alt köşeyi YouTube'un süre etiketi kapatır; üst sol etiket bandına hizalı)
-    wfont = load_font(26, font_path)
-    draw.text((W - 32, 68), config.CHANNEL_WATERMARK, font=wfont, fill=(255, 255, 255, 170), anchor="rm")
+        draw.rectangle([44, 38, 44 + tw + 40, 102], fill=palette["accent"] + (245,))
+        draw.text((64, 70), tag, font=tfont, fill=(255, 255, 255, 255), anchor="lm")
+    # Kanal adı kapakta yok: telefonda okunmuyordu, nesnenin alanını işgal ediyordu (YouTube adı zaten gösteriyor).
 
     final = _grain_and_sharpen(canvas, seed + variant)
 

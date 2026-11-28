@@ -44,6 +44,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg fonts-liberation fonts-dejavu-core
+          # Kapak için dar ve kalın yazı tipi (DejaVu Sans Condensed Bold): aynı genişliğe daha büyük yazı
+          sudo apt-get install -y -qq fonts-dejavu-extra || echo "::warning::fonts-dejavu-extra kurulamadı; kapakta standart yazı tipi kullanılacak."
 
       - name: Python 3.11
         uses: actions/setup-python@v5

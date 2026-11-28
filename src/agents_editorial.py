@@ -655,8 +655,8 @@ pan for reveals). Alternate source types so no more than 2 consecutive shots sha
                 errs.append("chapter_titles needs exactly 5 entries")
             if len(o.tags) < 8:
                 errs.append("at least 8 tags")
-            if not 1 <= len(o.thumbnail_text.split()) <= 4 or len(o.thumbnail_text) > 26:
-                errs.append("thumbnail_text: 1-4 words, max 26 characters")
+            if not 1 <= len(o.thumbnail_text.split()) <= 3 or len(o.thumbnail_text) > 20:
+                errs.append("thumbnail_text: 1-3 words, max 20 characters")
             hit = next((b for b in config.TOPIC_BLOCKLIST if b in f"{o.title} {o.thumbnail_text}".lower()), None)
             if hit:
                 errs.append(f"forbidden term: {hit}")
@@ -680,11 +680,13 @@ TASK
   'jetzt', 'gerade', 'this year', 'latest' in title, description_intro or thumbnail_text.
 - chapter_titles: exactly 5 short chapter names (one per act, spoiler-free).
 - tags: 12-15 niche tags; hashtags: exactly 3 (with #).
-- thumbnail_text: 1-3 striking words that create a question (e.g. 'VERBOTENE AKTE', 'WER WAR ER?'), uppercase.
+- thumbnail_text: 2-3 short, punchy words, max 20 characters, uppercase, that create a question or tension
+  (e.g. 'WER WAR ER?', 'GEKAUFT?', 'WUNDER ODER BETRUG?'). The last word is shown in a red box: make it the key word.
 - thumbnail_tag: a short truthful label for the corner banner (e.g. 'AKTE 1943', 'UNGELÖST'); no invented claims.
-- thumbnail_prompt_en: ONE dramatic, high-contrast, dark background image: a single strong subject lit from the
-  side, deep shadows, empty space on the left for text. No real person's face (silhouette, hands, object, door,
-  document stack). No text in the image.
+- thumbnail_prompt_en: ONE striking image built around a single, instantly recognizable subject (an object, a place
+  or a silhouette) in EXTREME CLOSE-UP: the subject fills the right half of the frame, brightly rim-lit with crisp
+  detail against a dark background; the left 40% is darker and calm for text. It must read clearly at phone size.
+  No real person's face (use a silhouette, hands, an object, a door, a document). No text in the image.
 - music_mood: choose the best fit. shorts_hook: one-line cliffhanger for a 45-second Short.
 EVERGREEN: the video must still make sense in ten years. Title, description and tags must NOT refer to current
 events, today's news, AI hype or the trend that inspired the topic; package the timeless story itself."""
@@ -713,11 +715,11 @@ events, today's news, AI hype or the trend that inspired the topic; package the 
         o.tags = list(dict.fromkeys(t.strip() for t in o.tags if t.strip()))[:15]
         o.hashtags = [h if h.startswith("#") else f"#{h}" for h in (x.strip().replace(" ", "") for x in o.hashtags) if h][:3]
         words = o.thumbnail_text.upper().split()
-        while words and (len(words) > 4 or len(" ".join(words)) > 26):
+        while words and (len(words) > 3 or len(" ".join(words)) > 20):
             words.pop()
-        o.thumbnail_text = " ".join(words) or cut(arc.working_title.upper(), 26)
+        o.thumbnail_text = " ".join(words) or cut(arc.working_title.upper(), 20)
         if any(b in o.thumbnail_text.lower() for b in config.TOPIC_BLOCKLIST):
-            o.thumbnail_text = cut(arc.working_title.upper(), 26)
+            o.thumbnail_text = cut(arc.working_title.upper(), 20)
         if "no text" not in o.thumbnail_prompt_en.lower():
             o.thumbnail_prompt_en += ", no text, no watermark"
         return o

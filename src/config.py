@@ -189,6 +189,11 @@ GEMINI_IMAGE_MODEL = _env("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 
 MIN_IMAGE_BYTES = 5000                                   # altı = bozuk görsel
 # Tek bir sanatsal dil: tüm AI görseller aynı "art direction" ekini alır.
+# Kapak arka planı: sahnelerden farklı olarak sis/karanlık değil, telefonda tanınacak net ve parlak bir nesne
+THUMB_ART_DIRECTION = (
+    "cinematic photograph, dramatic rim lighting, crisp sharp detail, high contrast, rich warm highlights, "
+    "dark background, shallow depth of field, no text, no watermark, no logos"
+)
 ART_DIRECTION = (
     "cinematic 35mm film still, dark moody chiaroscuro lighting, vintage archival atmosphere, "
     "volumetric fog, dramatic shadows, shallow depth of field, no text, no watermark, no logos"
@@ -318,7 +323,7 @@ THUMB_FONT_CANDIDATES = (
     Path("C:/Windows/Fonts/impact.ttf"),
 )
 CHANNEL_NAME = "Vor der Realität"
-CHANNEL_WATERMARK = CHANNEL_NAME.upper()            # kapakta sağ üst köşe
+CHANNEL_WATERMARK = CHANNEL_NAME.upper()
 
 
 # --------------------------------------------------------------------------- #

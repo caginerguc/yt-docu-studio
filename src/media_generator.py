@@ -531,10 +531,10 @@ class MediaGenerator:
     # ================================================================== #
     # Yapay zekâ görseli (sıralı, hız sınırına saygılı)
     # ================================================================== #
-    def _pollinations(self, prompt: str, path: Path, seed: int) -> bool:
+    def _pollinations(self, prompt: str, path: Path, seed: int, style: str | None = None) -> bool:
         if not prompt or not self.ai_ok:
             return False
-        full = quote(f"{prompt}, {config.ART_DIRECTION}")
+        full = quote(f"{prompt}, {style or config.ART_DIRECTION}")
         headers = {"Authorization": f"Bearer {config.POLLINATIONS_API_KEY}"} if config.POLLINATIONS_API_KEY else {}
         with self._ai_lock:                       # anonim kullanımda aynı anda tek istek
             for base, model, classic in config.pollinations_routes():
@@ -721,7 +721,8 @@ class MediaGenerator:
         thumb_bg = self.scenes_dir / "thumb_bg.jpg"
         if not thumb_bg.exists():
             q = keywords(self.plan.seo.thumbnail_prompt_en) or "dark mysterious archive"
-            if not (self._pollinations(self.plan.seo.thumbnail_prompt_en, thumb_bg, seed0 + 999)
+            if not (self._pollinations(self.plan.seo.thumbnail_prompt_en, thumb_bg, seed0 + 999,
+                                       style=config.THUMB_ART_DIRECTION)
                     or self._stock_photo(q, thumb_bg) or self._wikimedia(q, thumb_bg)):
                 stills = [p for p in (self._existing(t[0], t[1]) for t in tasks) if p is not None and p.suffix == ".jpg"]
                 if stills:
